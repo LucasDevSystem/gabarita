@@ -1,0 +1,32 @@
+# Blueprint do Render — https://render.com/docs/blueprint-spec
+#
+# Ao criar o serviço a partir deste arquivo, o Render vai pedir pra preencher
+# as variáveis marcadas "sync: false" (as credenciais AWS) direto no painel —
+# elas nunca ficam neste arquivo nem no git.
+#
+# Antes do primeiro deploy, rode localmente (com suas credenciais AWS):
+#   cd app/server
+#   pnpm criar:tabelas
+#   pnpm exportar:dynamo
+services:
+  - type: web
+    name: gabarita
+    runtime: node
+    plan: free
+    rootDir: app
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /api/filtros
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_DRIVER
+        value: dynamodb
+      - key: DYNAMO_TABLE_PREFIX
+        value: gabarita-
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false

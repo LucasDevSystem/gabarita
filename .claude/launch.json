@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gabarita",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd app && pnpm dev"],
+      "port": 5173
+    }
+  ]
+}

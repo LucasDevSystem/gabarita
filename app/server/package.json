@@ -1,0 +1,33 @@
+{
+  "name": "gabarita-server",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "ingest": "tsx src/scripts/ingest.ts",
+    "criar:tabelas": "tsx src/scripts/criar-tabelas-dynamo.ts",
+    "exportar:dynamo": "tsx src/scripts/exportar-dynamo.ts",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1110.0",
+    "@aws-sdk/lib-dynamodb": "^3.1110.0",
+    "@fastify/cors": "^10.0.1",
+    "@fastify/static": "^8.0.3",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.1.0",
+    "stream-chain": "^4.2.5",
+    "stream-json": "1.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/stream-json": "^1.7.8",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

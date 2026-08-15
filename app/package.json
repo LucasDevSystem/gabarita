@@ -1,0 +1,17 @@
+{
+  "name": "gabarita",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"pnpm --filter gabarita-server dev\" \"pnpm --filter gabarita-web dev\"",
+    "ingest": "pnpm --filter gabarita-server ingest",
+    "build": "pnpm --filter gabarita-web build && pnpm --filter gabarita-server build",
+    "start": "pnpm --filter gabarita-server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

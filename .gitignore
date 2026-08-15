@@ -1,0 +1,23 @@
+# raw scraped dataset — huge, not for version control
+/dados/
+/*.json
+
+# app
+/app/node_modules/
+/app/**/node_modules/
+/app/server/data/
+/app/server/dist/
+/app/web/dist/
+/app/**/.vite/
+/app/**/*.log
+
+# segredos — nunca sobem, só o .env.example (com placeholders) fica versionado
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secrets*
+
+.DS_Store
