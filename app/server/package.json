@@ -11,7 +11,10 @@
     "ingest": "tsx src/scripts/ingest.ts",
     "verificar:aws": "tsx src/scripts/verificar-aws.ts",
     "criar:tabelas": "tsx src/scripts/criar-tabelas-dynamo.ts",
+    "criar:indices": "tsx src/scripts/criar-indices-dynamo.ts",
+    "preencher:shard": "tsx src/scripts/preencher-shard-dynamo.ts",
     "exportar:dynamo": "tsx src/scripts/exportar-dynamo.ts",
+    "sincronizar:dynamo": "tsx src/scripts/sincronizar-dynamo.ts",
     "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
     "start": "node dist/index.js"
   },

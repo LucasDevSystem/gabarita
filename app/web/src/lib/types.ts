@@ -71,6 +71,10 @@ export interface Questao {
 
 export interface ListaQuestoesResponse {
   total: number;
+  // Quando falso, `total` é um piso ("mais de N") — contar exatamente uma
+  // combinação de filtros no DynamoDB exigiria percorrer tudo.
+  totalExato: boolean;
+  temMais: boolean;
   page: number;
   perPage: number;
   rows: Questao[];

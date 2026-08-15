@@ -277,7 +277,16 @@ export class RepositorioSqlite implements Repositorio {
       };
     });
 
-    return { total: totalRow.total, page: f.page, perPage: f.perPage, rows: parsed };
+    // SQL conta o conjunto inteiro de graça, então aqui o total é sempre exato
+    // (diferente do backend DynamoDB — ver ListaQuestoesResultado).
+    return {
+      total: totalRow.total,
+      totalExato: true,
+      temMais: f.page * f.perPage < totalRow.total,
+      page: f.page,
+      perPage: f.perPage,
+      rows: parsed,
+    };
   }
 
   async responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null> {

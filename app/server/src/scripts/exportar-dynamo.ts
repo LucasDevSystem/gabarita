@@ -11,7 +11,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { BatchWriteCommand, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { env } from "../config.js";
 import { getDb } from "../db/index.js";
-import { TABELA_LOOKUPS, TABELA_QUESTOES } from "../repo/dynamo.js";
+import { TABELA_LOOKUPS, TABELA_QUESTOES, TOTAL_SHARDS } from "../repo/dynamo.js";
 
 const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: env.aws.region }));
 
@@ -133,6 +133,10 @@ async function exportarQuestoes(db: ReturnType<typeof getDb>) {
 
   const itens = linhas.map((r) => ({
     id: r.id,
+    // partição do global-index (tela inicial, sem filtro de disciplina). Sem
+    // isso a questão não entra nesse índice e some da listagem sem filtro —
+    // silenciosamente, sem erro. Precisa bater com sincronizar-dynamo.ts.
+    shard: (r.id as number) % TOTAL_SHARDS,
     disciplinaId: r.disciplinaId,
     disciplinaNome: r.disciplinaNome,
     dificuldade: r.dificuldade,

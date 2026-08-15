@@ -33,7 +33,10 @@ export function QuestoesPage() {
     placeholderData: keepPreviousData,
   });
 
-  const totalPaginas = data ? Math.max(1, Math.ceil(data.total / data.perPage)) : 1;
+  // Com total inexato não dá pra saber quantas páginas existem — a navegação
+  // passa a se guiar por `temMais`, que o backend sabe com certeza.
+  const totalPaginas =
+    data && data.totalExato ? Math.max(1, Math.ceil(data.total / data.perPage)) : null;
 
   return (
     <div className="space-y-4">
@@ -45,6 +48,7 @@ export function QuestoesPage() {
             <>
               <span className="text-foreground font-medium">
                 {data.total.toLocaleString("pt-BR")}
+                {!data.totalExato && "+"}
               </span>{" "}
               questões encontradas
             </>
@@ -132,12 +136,13 @@ export function QuestoesPage() {
             Anterior
           </Button>
           <span className="text-muted-foreground text-sm">
-            Página {filtros.page} de {totalPaginas.toLocaleString("pt-BR")}
+            Página {filtros.page}
+            {totalPaginas !== null && ` de ${totalPaginas.toLocaleString("pt-BR")}`}
           </span>
           <Button
             variant="outline"
             size="sm"
-            disabled={filtros.page >= totalPaginas}
+            disabled={!data.temMais}
             onClick={() => aoMudar({ page: filtros.page + 1 })}
           >
             Próxima

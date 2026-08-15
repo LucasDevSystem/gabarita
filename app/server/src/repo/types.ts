@@ -86,6 +86,15 @@ export interface FiltrosQuery {
 
 export interface ListaQuestoesResultado {
   total: number;
+  // Falso quando `total` é só um piso ("mais de N"). Contar exatamente uma
+  // combinação arbitrária de filtros exige percorrer o conjunto inteiro, o
+  // que não escala — então o backend DynamoDB devolve o total exato só quando
+  // ele sai das contagens pré-calculadas (ver totalPreCalculado em
+  // repo/dynamo.ts). No SQLite é sempre exato.
+  totalExato: boolean;
+  // Se existe pelo menos mais uma página adiante. O frontend usa isso pra
+  // habilitar "Próxima" em vez de depender de total/perPage.
+  temMais: boolean;
   page: number;
   perPage: number;
   rows: Questao[];

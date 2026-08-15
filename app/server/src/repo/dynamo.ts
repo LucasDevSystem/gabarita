@@ -38,7 +38,50 @@ import type {
 export const TABELA_QUESTOES = `${env.aws.tablePrefix}questoes`;
 export const TABELA_RESPOSTAS = `${env.aws.tablePrefix}respostas`;
 export const TABELA_LOOKUPS = `${env.aws.tablePrefix}lookups`;
+// Índice original, com ProjectionType ALL. Nenhuma consulta usa mais — fica
+// aqui só pro script de limpeza saber o nome. Pode ser apagado depois que os
+// índices enxutos estiverem em produção.
 export const INDICE_DISCIPLINA = "disciplina-index";
+
+// Índices enxutos (ProjectionType INCLUDE só com o que os filtros leem). O
+// disciplina-index antigo projeta ALL, ou seja, cada entrada é uma cópia
+// integral da questão (~3,2KB) — ler só os ids dele custava 375 itens por ida
+// ao DynamoDB. Com a projeção enxuta cabem ~3x mais itens por página de 1MB.
+export const INDICE_BUSCA = "busca-index";
+export const INDICE_GLOBAL = "global-index";
+
+// Sem filtro de disciplina não há partição natural pra consultar em ordem —
+// esse shard sintético (id % TOTAL_SHARDS) dá ao global-index um punhado de
+// partições que dá pra varrer em paralelo e juntar por merge, em vez de um
+// Scan da tabela inteira. Precisa bater com o valor gravado pelo
+// sincronizar-dynamo.ts; mudar isso exige regravar todas as questões.
+export const TOTAL_SHARDS = 8;
+
+// Partição de lookup com a contagem de assuntos escopada a uma disciplina:
+// tipo = "assunto-disc-<disciplinaId>", id = assuntoId. Assim o seletor de
+// Assunto lê uma partição pequena em vez de percorrer todas as questões da
+// disciplina só pra contar.
+export const PREFIXO_ASSUNTO_DISCIPLINA = "assunto-disc-";
+
+// Atributos que o busca-index/global-index projetam. Tudo que
+// montarFilterExpression consegue tocar precisa estar aqui, senão o filtro
+// silenciosamente não casa (a projeção é aplicada na escrita do índice).
+export const ATRIBUTOS_PROJETADOS = [
+  "bancaIds",
+  "orgaoIds",
+  "cargoIds",
+  "carreiraIds",
+  "areaIds",
+  "assuntoIds",
+  "anos",
+  "dificuldade",
+  "nivel",
+  "tipo",
+  "anulada",
+  "desatualizada",
+  "comentarios",
+  "enunciadoBusca",
+];
 
 interface ItemLookup {
   tipo: string;
@@ -102,43 +145,6 @@ async function scanCompleto<T>(params: ScanCommandInput): Promise<T[]> {
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
   return itens;
-}
-
-// Fallback quando nenhuma disciplina é escolhida (ver buscarCandidatos): sem
-// GSI pra esse caso, a única opção é varrer a tabela inteira. Uma Scan
-// sequencial em ~100 mil itens percorre a tabela página por página (~1MB
-// cada) uma de cada vez — lento o bastante pra doer numa requisição HTTP. O
-// parâmetro nativo Segment/TotalSegments do DynamoDB permite varrer pedaços
-// da tabela em paralelo; isso não reduz o RCU total consumido, mas corta o
-// tempo de parede quase que linearmente com o número de segmentos, porque o
-// gargalo real é esperar a rede, não CPU (então paraleliza bem mesmo numa
-// instância de 1 vCPU do Render).
-const SEGMENTOS_SCAN_PARALELO = 8;
-
-async function scanCompletoParalelo<T>(
-  params: Omit<ScanCommandInput, "Segment" | "TotalSegments">,
-): Promise<T[]> {
-  const doc = getCliente();
-  const porSegmento = await Promise.all(
-    Array.from({ length: SEGMENTOS_SCAN_PARALELO }, async (_, Segment) => {
-      const itens: T[] = [];
-      let ExclusiveStartKey: ScanCommandInput["ExclusiveStartKey"];
-      do {
-        const res = await doc.send(
-          new ScanCommand({
-            ...params,
-            Segment,
-            TotalSegments: SEGMENTOS_SCAN_PARALELO,
-            ExclusiveStartKey,
-          }),
-        );
-        itens.push(...((res.Items as T[]) ?? []));
-        ExclusiveStartKey = res.LastEvaluatedKey;
-      } while (ExclusiveStartKey);
-      return itens;
-    }),
-  );
-  return porSegmento.flat();
 }
 
 async function queryCompleto<T>(params: QueryCommandInput): Promise<T[]> {
@@ -208,19 +214,24 @@ function montarFilterExpression(f: FiltrosQuery) {
     partes.push("#desatualizada = :desatFalse");
   }
 
-  const COMENTARIO_ATTR: Record<string, string> = {
-    ia: "comentariosIa",
-    professor: "comentariosProfessor",
-    professorVideo: "comentariosProfessorVideo",
-    aluno: "comentariosAluno",
+  // O item grava um mapa aninhado (comentarios: {ia, professor, ...}), não
+  // atributos de topo. Antes isso apontava pra "comentariosIa" e afins, que
+  // não existem em item nenhum — o filtro de comentários nunca casava e
+  // sempre devolvia zero questões. FilterExpression aceita caminho aninhado.
+  const CAMPO_COMENTARIO: Record<string, string> = {
+    ia: "ia",
+    professor: "professor",
+    professorVideo: "professorVideo",
+    aluno: "aluno",
   };
-  const comentariosValidos = f.comentarios.filter((c) => c in COMENTARIO_ATTR);
+  const comentariosValidos = f.comentarios.filter((c) => c in CAMPO_COMENTARIO);
   if (comentariosValidos.length) {
+    nomes["#comentarios"] = "comentarios";
     valores[":cTrue"] = true;
     const ors = comentariosValidos.map((c) => {
-      const attr = COMENTARIO_ATTR[c];
-      nomes[`#${attr}`] = attr;
-      return `#${attr} = :cTrue`;
+      const campo = CAMPO_COMENTARIO[c];
+      nomes[`#c_${campo}`] = campo;
+      return `#comentarios.#c_${campo} = :cTrue`;
     });
     partes.push(`(${ors.join(" OR ")})`);
   }
@@ -238,42 +249,159 @@ function montarFilterExpression(f: FiltrosQuery) {
   };
 }
 
+// Espelho em memória de montarFilterExpression, usado só no caminho de
+// resolvidas/certas/erradas, onde o conjunto candidato vem da tabela de
+// respostas (pequeno) em vez do índice. Mexeu num, mexa no outro.
+function casaFiltros(q: ItemQuestaoDynamo, f: FiltrosQuery): boolean {
+  const algum = (ids: number[] | undefined, escolhidos: number[]) =>
+    !escolhidos.length || escolhidos.some((v) => (ids ?? []).includes(v));
+
+  if (!algum(q.assuntoIds, f.assunto)) return false;
+  if (!algum(q.bancaIds, f.banca)) return false;
+  if (!algum(q.orgaoIds, f.orgao)) return false;
+  if (!algum(q.cargoIds, f.cargo)) return false;
+  if (!algum(q.carreiraIds, f.carreira)) return false;
+  if (!algum(q.areaIds, f.area)) return false;
+  if (!algum(q.anos, f.ano)) return false;
+  if (f.disciplina.length && !f.disciplina.includes(q.disciplinaId)) return false;
+  if (f.dificuldade.length && (q.dificuldade == null || !f.dificuldade.includes(q.dificuldade))) return false;
+  if (f.escolaridade.length && (!q.nivel || !f.escolaridade.includes(q.nivel))) return false;
+  if (f.tipo.length && (!q.tipo || !f.tipo.includes(q.tipo))) return false;
+  if (!f.incluirAnuladas && q.anulada) return false;
+  if (!f.incluirDesatualizadas && q.desatualizada) return false;
+
+  if (f.comentarios.length) {
+    const c = q.comentarios;
+    const bate = f.comentarios.some(
+      (nome) =>
+        (nome === "ia" && c?.ia) ||
+        (nome === "professor" && c?.professor) ||
+        (nome === "professorVideo" && c?.professorVideo) ||
+        (nome === "aluno" && c?.aluno),
+    );
+    if (!bate) return false;
+  }
+
+  const termo = f.q?.trim().toLowerCase();
+  if (termo && !(q.enunciadoBusca ?? "").includes(termo)) return false;
+
+  return true;
+}
+
+// Estado do merge k-way entre as partições consultadas (as disciplinas
+// escolhidas, ou os shards do global-index quando não há disciplina).
+interface EstadoParticao {
+  cursor?: Record<string, unknown>;
+  esgotada: boolean;
+  buffer: number[];
+}
+
+interface EstadoPagina {
+  particoes: Map<number, EstadoParticao>;
+  // quantos ids já foram entregues desde a página 1 — vira o "1.000+" quando
+  // não dá pra saber o total exato.
+  entregues: number;
+}
+
+// Teto de idas ao DynamoDB por página, pra um filtro muito seletivo (que lê
+// muito e aproveita pouco) não transformar uma requisição em varredura.
+const MAX_IDAS_POR_PAGINA = 60;
+
+function novoEstado(f: FiltrosQuery): EstadoPagina {
+  const chaves = f.disciplina.length
+    ? f.disciplina
+    : Array.from({ length: TOTAL_SHARDS }, (_, i) => i);
+  return {
+    particoes: new Map(chaves.map((c) => [c, { esgotada: false, buffer: [] }])),
+    entregues: 0,
+  };
+}
+
+function clonarEstado(e: EstadoPagina): EstadoPagina {
+  return {
+    entregues: e.entregues,
+    particoes: new Map(
+      [...e.particoes].map(([c, p]) => [
+        c,
+        { cursor: p.cursor, esgotada: p.esgotada, buffer: [...p.buffer] },
+      ]),
+    ),
+  };
+}
+
+const chaveEstado = (assinatura: string, perPage: number, page: number) =>
+  `${assinatura}|${perPage}|${page}`;
+
 export class RepositorioDynamo implements Repositorio {
   capacidades: Capacidades = { ordenacaoPorDificuldade: false };
 
-  private cacheLookups: Map<string, ItemLookup[]> | null = null;
-  // Só os ids ficam em cache (não os registros inteiros) — ver buscarIdsCandidatos.
-  private cacheCandidatos = new Map<string, { expira: number; ids: number[] }>();
-  private cacheAssuntosPorDisciplina = new Map<string, { expira: number; contagens: Map<number, number> }>();
+  private cacheLookups = new Map<string, ItemLookup[]>();
+  // Cursor de cada (filtro, perPage, página), pra servir a página seguinte sem
+  // repercorrer o que já foi lido.
+  private cacheEstados = new Map<string, { expira: number; estado: EstadoPagina }>();
+  private cacheRespostas: { expira: number; itens: ItemResposta[] } | null = null;
+  private cacheAssuntosPorDisciplina = new Map<
+    string,
+    { expira: number; contagens: Map<number, { nome: string; qtd: number }> }
+  >();
   private readonly TTL_CACHE_MS = 60_000;
 
-  // Sem tabela de junção questão-assunto nesse desenho "simples" — pra saber
-  // quais assuntos existem (e quantas questões cada um tem) dentro de uma
-  // disciplina, consulta o GSI da disciplina pedindo só o atributo
-  // "assuntoIds" (leve, não traz o corpo da questão) e agrega em memória.
-  private async contarAssuntosPorDisciplina(disciplinaIds: number[]): Promise<Map<number, number>> {
+  // Assuntos de uma disciplina, com quantas questões cada um tem ali dentro.
+  // O caminho rápido lê a contagem que o sync já deixou pronta numa partição
+  // pequena; sem ela, percorre a partição da disciplina e conta (era o único
+  // caminho antes, e custava os mesmos ~30s da listagem).
+  private async contarAssuntosPorDisciplina(
+    disciplinaIds: number[],
+  ): Promise<Map<number, { nome: string; qtd: number }>> {
     const chave = [...disciplinaIds].sort((a, b) => a - b).join(",");
     const cache = this.cacheAssuntosPorDisciplina.get(chave);
     if (cache && cache.expira > Date.now()) return cache.contagens;
 
     const porDisciplina = await Promise.all(
-      disciplinaIds.map((disciplinaId) =>
-        queryCompleto<{ assuntoIds?: number[] }>({
+      disciplinaIds.map(async (disciplinaId) => {
+        // Caminho rápido: contagem já pré-calculada pelo sync, numa partição
+        // própria e pequena.
+        const prontas = await queryCompleto<ItemLookup>({
+          TableName: TABELA_LOOKUPS,
+          KeyConditionExpression: "tipo = :t",
+          ExpressionAttributeValues: { ":t": `${PREFIXO_ASSUNTO_DISCIPLINA}${disciplinaId}` },
+        });
+        // O registro pré-calculado já traz o nome, então nem precisa carregar
+        // a lista inteira de assuntos pra montar o seletor.
+        if (prontas.length) return prontas.map((l) => [l.id, { nome: l.nome, qtd: l.qtdQuestoes }] as const);
+
+        // Disciplina ainda não re-sincronizada (as que só têm a amostra de
+        // 10%): percorre a partição inteira pra contar. Lento, mas correto —
+        // e some sozinho conforme as disciplinas são migradas. Usa o
+        // busca-index (não o disciplina-index antigo, que projeta ALL e custa
+        // ~3x mais por item lido) pra que o índice antigo possa ser apagado.
+        const itens = await queryCompleto<{ assuntoIds?: number[] }>({
           TableName: TABELA_QUESTOES,
-          IndexName: INDICE_DISCIPLINA,
+          IndexName: INDICE_BUSCA,
           KeyConditionExpression: "disciplinaId = :disc",
           ProjectionExpression: "assuntoIds",
           ExpressionAttributeValues: { ":disc": disciplinaId },
-        }),
-      ),
+        });
+        const parcial = new Map<number, number>();
+        for (const item of itens) {
+          for (const assuntoId of item.assuntoIds ?? []) {
+            parcial.set(assuntoId, (parcial.get(assuntoId) ?? 0) + 1);
+          }
+        }
+        // Sem contagem pronta não há nome junto: aí sim busca a lista de
+        // assuntos (caminho lento, só pras disciplinas ainda não migradas).
+        const nomes = new Map((await this.lookups("assunto")).map((i) => [i.id, i.nome]));
+        return [...parcial.entries()].map(
+          ([id, qtd]) => [id, { nome: nomes.get(id) ?? `Assunto ${id}`, qtd }] as const,
+        );
+      }),
     );
 
-    const contagens = new Map<number, number>();
+    const contagens = new Map<number, { nome: string; qtd: number }>();
     for (const lista of porDisciplina) {
-      for (const item of lista) {
-        for (const assuntoId of item.assuntoIds ?? []) {
-          contagens.set(assuntoId, (contagens.get(assuntoId) ?? 0) + 1);
-        }
+      for (const [assuntoId, info] of lista) {
+        const atual = contagens.get(assuntoId);
+        contagens.set(assuntoId, { nome: info.nome, qtd: (atual?.qtd ?? 0) + info.qtd });
       }
     }
 
@@ -282,42 +410,49 @@ export class RepositorioDynamo implements Repositorio {
     return contagens;
   }
 
-  private async carregarLookups(): Promise<Map<string, ItemLookup[]>> {
-    if (this.cacheLookups) return this.cacheLookups;
-    const itens = await scanCompleto<ItemLookup>({ TableName: TABELA_LOOKUPS });
-    const mapa = new Map<string, ItemLookup[]>();
-    for (const item of itens) {
-      const lista = mapa.get(item.tipo) ?? [];
-      lista.push(item);
-      mapa.set(item.tipo, lista);
-    }
-    this.cacheLookups = mapa;
-    return mapa;
+  // Carrega UM tipo de lookup, sob demanda. Query por tipo (que é a PK) em vez
+  // de Scan: a tabela também guarda as partições "assunto-disc-<id>", que
+  // somadas passam de 100 mil itens e não têm nada a ver com os filtros base.
+  //
+  // Sob demanda, e não tudo de uma vez, porque "assunto" sozinho tem ~30 mil
+  // registros e quase nenhuma tela precisa dele — carregar os 11 tipos juntos
+  // custava 3-4s na primeira requisição, o que no Render free (que hiberna)
+  // seria pago toda vez que o serviço acorda.
+  private async lookups(tipo: string): Promise<ItemLookup[]> {
+    const emCache = this.cacheLookups.get(tipo);
+    if (emCache) return emCache;
+    const itens = await queryCompleto<ItemLookup>({
+      TableName: TABELA_LOOKUPS,
+      KeyConditionExpression: "tipo = :t",
+      ExpressionAttributeValues: { ":t": tipo },
+    });
+    this.cacheLookups.set(tipo, itens);
+    return itens;
   }
 
   async filtrosBase(): Promise<FiltrosBase> {
-    const mapa = await this.carregarLookups();
+    // Só os tipos que esta tela mostra — "assunto" (o maior, ~30 mil) fica de
+    // fora porque o seletor de Assunto é carregado à parte, por disciplina.
+    const [disciplina, carreira, area, ano, dificuldade, escolaridade, tipoQuestao] = await Promise.all(
+      ["disciplina", "carreira", "area", "ano", "dificuldade", "escolaridade", "tipoQuestao"].map((t) =>
+        this.lookups(t),
+      ),
+    );
     const porQtdDesc = (a: { qtdQuestoes: number }, b: { qtdQuestoes: number }) => b.qtdQuestoes - a.qtdQuestoes;
     const toOpcao = (i: ItemLookup): OpcaoFiltro => ({ id: i.id, nome: i.nome, qtdQuestoes: i.qtdQuestoes });
 
     return {
-      disciplinas: (mapa.get("disciplina") ?? [])
+      disciplinas: disciplina
         .map((i) => ({ id: i.id, nome: i.nome, slug: i.slug ?? "", qtdQuestoes: i.qtdQuestoes }))
         .sort((a, b) => a.nome.localeCompare(b.nome)),
-      carreiras: (mapa.get("carreira") ?? []).map(toOpcao).sort(porQtdDesc),
-      areas: (mapa.get("area") ?? []).map(toOpcao).sort(porQtdDesc),
-      anos: (mapa.get("ano") ?? [])
-        .map((i) => ({ ano: i.id, qtdQuestoes: i.qtdQuestoes }))
-        .sort((a, b) => b.ano - a.ano),
-      dificuldades: (mapa.get("dificuldade") ?? [])
+      carreiras: carreira.map(toOpcao).sort(porQtdDesc),
+      areas: area.map(toOpcao).sort(porQtdDesc),
+      anos: ano.map((i) => ({ ano: i.id, qtdQuestoes: i.qtdQuestoes })).sort((a, b) => b.ano - a.ano),
+      dificuldades: dificuldade
         .map((i) => ({ dificuldade: i.id, qtdQuestoes: i.qtdQuestoes }))
         .sort((a, b) => a.dificuldade - b.dificuldade),
-      escolaridades: (mapa.get("escolaridade") ?? [])
-        .map((i) => ({ nivel: i.nome, qtdQuestoes: i.qtdQuestoes }))
-        .sort(porQtdDesc),
-      tipos: (mapa.get("tipoQuestao") ?? [])
-        .map((i) => ({ tipo: i.nome, qtdQuestoes: i.qtdQuestoes }))
-        .sort(porQtdDesc),
+      escolaridades: escolaridade.map((i) => ({ nivel: i.nome, qtdQuestoes: i.qtdQuestoes })).sort(porQtdDesc),
+      tipos: tipoQuestao.map((i) => ({ tipo: i.nome, qtdQuestoes: i.qtdQuestoes })).sort(porQtdDesc),
     };
   }
 
@@ -331,21 +466,15 @@ export class RepositorioDynamo implements Repositorio {
 
     if (tipo === "assuntos") {
       if (!disciplinaIds?.length) return [];
-      const [contagens, mapaLookups] = await Promise.all([
-        this.contarAssuntosPorDisciplina(disciplinaIds),
-        this.carregarLookups(),
-      ]);
-      const nomesAssuntos = new Map((mapaLookups.get("assunto") ?? []).map((i) => [i.id, i.nome]));
-
+      const contagens = await this.contarAssuntosPorDisciplina(disciplinaIds);
       return [...contagens.entries()]
-        .map(([id, qtdQuestoes]) => ({ id, nome: nomesAssuntos.get(id) ?? `Assunto ${id}`, qtdQuestoes }))
+        .map(([id, { nome, qtd }]) => ({ id, nome, qtdQuestoes: qtd }))
         .filter((o) => !termo || o.nome.toLowerCase().includes(termo))
         .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)
         .slice(0, limit);
     }
 
-    const mapa = await this.carregarLookups();
-    const lista = mapa.get(LOOKUP_TIPO[tipo]) ?? [];
+    const lista = await this.lookups(LOOKUP_TIPO[tipo]);
     return lista
       .filter((i) => i.qtdQuestoes > 0 && (!termo || i.nome.toLowerCase().includes(termo)))
       .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)
@@ -353,60 +482,169 @@ export class RepositorioDynamo implements Repositorio {
       .map((i) => ({ id: i.id, nome: i.nome, qtdQuestoes: i.qtdQuestoes }));
   }
 
-  // Traz só o "id" de cada questão que bate com os filtros — nunca o corpo
-  // inteiro (enunciado, itens, provas) para o conjunto inteiro de candidatos.
-  // Isso é o que mantém uma Scan sem disciplina segura em memória: ~100 mil
-  // ids cabem em menos de 1MB, enquanto ~100 mil registros completos passam
-  // de 200-500MB — o suficiente pra estourar os 512MB do plano free do
-  // Render (foi exatamente isso que causava os 502 intermitentes). Os
-  // registros completos só são buscados depois, já filtrados pra só os ~20
-  // a 100 ids que realmente vão pra página pedida (ver listarQuestoes).
-  private async buscarIdsCandidatos(f: FiltrosQuery): Promise<number[]> {
-    const assinatura = JSON.stringify({ ...f, page: undefined, perPage: undefined });
-    const cache = this.cacheCandidatos.get(assinatura);
-    if (cache && cache.expira > Date.now()) return cache.ids;
-
+  // Avança o estado de paginação em `quantidade` ids, na ordem global de id
+  // decrescente, lendo só o necessário.
+  //
+  // O desenho anterior materializava TODOS os ids que batiam com o filtro,
+  // ordenava em memória e cortava a página — O(N) por requisição. Medido em
+  // produção com 566 mil questões: 304 idas ao DynamoDB e ~38.000 RCU pra
+  // devolver 20 itens (30s). Aqui os índices já entregam ordenado por id
+  // (SK do índice, com ScanIndexForward: false), então basta ler a página:
+  // ~10 RCU e uma ida por partição.
+  private async avancar(
+    f: FiltrosQuery,
+    estado: EstadoPagina,
+    quantidade: number,
+    ignorar?: Set<number>,
+  ): Promise<number[]> {
     const { FilterExpression, ExpressionAttributeNames, ExpressionAttributeValues } =
       montarFilterExpression(f);
-    const nomesComId = { ...ExpressionAttributeNames, "#id": "id" };
+    const porDisciplina = f.disciplina.length > 0;
+    const doc = getCliente();
 
-    let ids: number[];
-    if (f.disciplina.length) {
-      const porDisciplina = await Promise.all(
-        f.disciplina.map((disciplinaId) =>
-          queryCompleto<{ id: number }>({
+    // Com FilterExpression o Limit conta itens LIDOS, não os que passam — ler
+    // blocos maiores evita dezenas de viagens quando o filtro é seletivo.
+    const limitePorIda = FilterExpression ? 400 : Math.max(quantidade, 25);
+    let idas = 0;
+
+    const abastecer = async (chave: number, p: EstadoParticao) => {
+      while (!p.esgotada && p.buffer.length === 0 && idas < MAX_IDAS_POR_PAGINA) {
+        idas++;
+        const res = await doc.send(
+          new QueryCommand({
             TableName: TABELA_QUESTOES,
-            IndexName: INDICE_DISCIPLINA,
-            KeyConditionExpression: "disciplinaId = :disc",
+            IndexName: porDisciplina ? INDICE_BUSCA : INDICE_GLOBAL,
+            // "shard" é palavra reservada no DynamoDB — só funciona via alias.
+            KeyConditionExpression: "#pk = :p",
             FilterExpression,
             ProjectionExpression: "#id",
-            ExpressionAttributeNames: nomesComId,
-            ExpressionAttributeValues: { ...ExpressionAttributeValues, ":disc": disciplinaId },
+            ExpressionAttributeNames: {
+              ...ExpressionAttributeNames,
+              "#id": "id",
+              "#pk": porDisciplina ? "disciplinaId" : "shard",
+            },
+            ExpressionAttributeValues: { ...ExpressionAttributeValues, ":p": chave },
+            ScanIndexForward: false,
+            Limit: limitePorIda,
+            ExclusiveStartKey: p.cursor,
           }),
-        ),
-      );
-      ids = porDisciplina.flat().map((i) => i.id);
-    } else {
-      const leves = await scanCompletoParalelo<{ id: number }>({
-        TableName: TABELA_QUESTOES,
-        FilterExpression,
-        ProjectionExpression: "#id",
-        ExpressionAttributeNames: nomesComId,
-        ExpressionAttributeValues,
-      });
-      ids = leves.map((i) => i.id);
+        );
+        for (const item of ((res.Items ?? []) as { id: number }[])) {
+          if (!ignorar?.has(item.id)) p.buffer.push(item.id);
+        }
+        p.cursor = res.LastEvaluatedKey;
+        if (!res.LastEvaluatedKey) p.esgotada = true;
+      }
+    };
+
+    const ids: number[] = [];
+    while (ids.length < quantidade) {
+      // Todas as partições precisam ter pelo menos um id disponível antes de
+      // escolher o próximo, senão o merge pode entregar fora de ordem.
+      await Promise.all([...estado.particoes].map(([chave, p]) => abastecer(chave, p)));
+
+      let melhorChave: number | null = null;
+      let melhorId = -Infinity;
+      for (const [chave, p] of estado.particoes) {
+        if (p.buffer.length && p.buffer[0] > melhorId) {
+          melhorId = p.buffer[0];
+          melhorChave = chave;
+        }
+      }
+      // nada disponível em partição nenhuma (tudo esgotado, ou o teto de idas
+      // foi atingido) — devolve o que deu
+      if (melhorChave === null) break;
+
+      estado.particoes.get(melhorChave)!.buffer.shift();
+      ids.push(melhorId);
     }
 
-    // Sem GSI de dificuldade nesse desenho "simples" — ordena sempre por id
-    // (proxy de mais recente); capacidades.ordenacaoPorDificuldade=false diz
-    // ao frontend pra não oferecer as opções de ordenar por dificuldade.
-    ids.sort((a, b) => b - a);
-
-    // Trava simples contra o cache crescer sem limite se muitas combinações
-    // de filtro diferentes forem usadas dentro da mesma janela de 60s.
-    if (this.cacheCandidatos.size > 50) this.cacheCandidatos.clear();
-    this.cacheCandidatos.set(assinatura, { expira: Date.now() + this.TTL_CACHE_MS, ids });
+    estado.entregues += ids.length;
     return ids;
+  }
+
+  private temMais(estado: EstadoPagina): boolean {
+    return [...estado.particoes.values()].some((p) => p.buffer.length > 0 || !p.esgotada);
+  }
+
+  // Estado inicial da página pedida. Página 1 começa do zero; as demais
+  // reaproveitam o cursor guardado ao servir a página anterior, e só
+  // percorrem de novo se o cache expirou (agora barato: cada página custa
+  // ~10 RCU, não 38.000).
+  private async estadoParaPagina(
+    f: FiltrosQuery,
+    assinatura: string,
+    ignorar?: Set<number>,
+  ): Promise<EstadoPagina> {
+    if (f.page <= 1) return novoEstado(f);
+
+    const direto = this.cacheEstados.get(chaveEstado(assinatura, f.perPage, f.page));
+    if (direto && direto.expira > Date.now()) return clonarEstado(direto.estado);
+
+    let paginaBase = 1;
+    let estado = novoEstado(f);
+    for (let p = f.page - 1; p > 1; p--) {
+      const c = this.cacheEstados.get(chaveEstado(assinatura, f.perPage, p));
+      if (c && c.expira > Date.now()) {
+        paginaBase = p;
+        estado = clonarEstado(c.estado);
+        break;
+      }
+    }
+    for (let p = paginaBase; p < f.page; p++) {
+      await this.avancar(f, estado, f.perPage, ignorar);
+    }
+    return estado;
+  }
+
+  private guardarEstado(assinatura: string, perPage: number, page: number, estado: EstadoPagina) {
+    if (this.cacheEstados.size > 200) this.cacheEstados.clear();
+    this.cacheEstados.set(chaveEstado(assinatura, perPage, page), {
+      expira: Date.now() + this.TTL_CACHE_MS,
+      estado: clonarEstado(estado),
+    });
+  }
+
+  // Total exato só quando sai de graça das contagens já pré-calculadas em
+  // gabarita-lookups. Numa combinação de filtros, contar exige percorrer o
+  // conjunto inteiro — exatamente o que esta reescrita eliminou —, então aí
+  // o total vira "quantos vimos até agora" e o frontend mostra "1.000+".
+  private async totalPreCalculado(f: FiltrosQuery): Promise<number | null> {
+    // As contagens são gravadas já descontando anuladas/desatualizadas, que é
+    // o padrão da tela; pedir pra incluí-las sai desse caminho.
+    if (f.incluirAnuladas || f.incluirDesatualizadas) return null;
+    if (f.minhasQuestoes || f.q?.trim()) return null;
+
+    const facetas: [string, (number | string)[]][] = [
+      ["disciplina", f.disciplina],
+      ["assunto", f.assunto],
+      ["banca", f.banca],
+      ["orgao", f.orgao],
+      ["cargo", f.cargo],
+      ["carreira", f.carreira],
+      ["area", f.area],
+      ["ano", f.ano],
+      ["dificuldade", f.dificuldade],
+      ["escolaridade", f.escolaridade],
+      ["tipoQuestao", f.tipo],
+      ["comentarios", f.comentarios],
+    ];
+    const ativas = facetas.filter(([, v]) => v.length);
+
+    if (!ativas.length) {
+      return (await this.lookups("disciplina")).reduce((s, d) => s + d.qtdQuestoes, 0);
+    }
+    // Duas facetas = interseção; vários valores da mesma faceta = união com
+    // possível sobreposição. Nenhum dos dois dá pra derivar das contagens.
+    const [tipo, valores] = ativas[0];
+    if (ativas.length > 1 || valores.length !== 1 || tipo === "comentarios") return null;
+
+    const lista = await this.lookups(tipo);
+    const alvo = valores[0];
+    // escolaridade e tipoQuestao são filtrados pelo nome (string); o resto por id.
+    const achado =
+      typeof alvo === "string" ? lista.find((i) => i.nome === alvo) : lista.find((i) => i.id === alvo);
+    return achado ? achado.qtdQuestoes : null;
   }
 
   private async buscarQuestoesPorId(ids: number[]): Promise<ItemQuestaoDynamo[]> {
@@ -465,47 +703,93 @@ export class RepositorioDynamo implements Repositorio {
     };
   }
 
-  async listarQuestoes(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
-    let ids = await this.buscarIdsCandidatos(f);
+  // Todas as respostas já dadas. A tabela é pequena por natureza (só o que o
+  // usuário respondeu), então cabe em memória e evita ida por questão.
+  private async carregarRespostas(): Promise<ItemResposta[]> {
+    if (this.cacheRespostas && this.cacheRespostas.expira > Date.now()) {
+      return this.cacheRespostas.itens;
+    }
+    const itens = await scanCompleto<ItemResposta>({ TableName: TABELA_RESPOSTAS });
+    this.cacheRespostas = { expira: Date.now() + this.TTL_CACHE_MS, itens };
+    return itens;
+  }
 
-    let mapaRespostas: Map<number, ItemResposta> | null = null;
-    if (f.minhasQuestoes) {
-      mapaRespostas = await this.buscarRespostasEmLote(ids);
-      ids = ids.filter((id) => {
-        const r = mapaRespostas!.get(id);
-        switch (f.minhasQuestoes) {
-          case "resolvidas":
-            return !!r;
-          case "naoresolvidas":
-            return !r;
-          case "certas":
-            return r?.correta === true;
-          case "erradas":
-            return r?.correta === false;
-          default:
-            return true;
-        }
-      });
+  async listarQuestoes(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
+    // "resolvidas/certas/erradas" já têm o conjunto candidato pronto e pequeno
+    // na tabela de respostas — percorrer o índice de questões pra depois
+    // descartar quase tudo seria muito pior.
+    if (f.minhasQuestoes && f.minhasQuestoes !== "naoresolvidas") {
+      return this.listarPorRespostas(f);
     }
 
-    const total = ids.length;
+    const ignorar =
+      f.minhasQuestoes === "naoresolvidas"
+        ? new Set((await this.carregarRespostas()).map((r) => r.questaoId))
+        : undefined;
+
+    const assinatura = JSON.stringify({ ...f, page: undefined, perPage: undefined });
+    const estado = await this.estadoParaPagina(f, assinatura, ignorar);
+    const ids = await this.avancar(f, estado, f.perPage, ignorar);
+    const temMais = this.temMais(estado);
+    this.guardarEstado(assinatura, f.perPage, f.page + 1, estado);
+
+    const rows = await this.montarLinhas(ids);
+
+    const preCalculado = await this.totalPreCalculado(f);
+    return {
+      total: preCalculado ?? estado.entregues,
+      // sem contagem pronta, "entregues" é só um piso — a menos que já tenha
+      // acabado, aí o que vimos É o total.
+      totalExato: preCalculado !== null || !temMais,
+      temMais,
+      page: f.page,
+      perPage: f.perPage,
+      rows,
+    };
+  }
+
+  // Caminho para resolvidas/certas/erradas: parte da tabela de respostas
+  // (pequena e já é o conjunto candidato) e aplica os demais filtros em
+  // memória sobre os corpos — ver casaFiltros, que espelha
+  // montarFilterExpression.
+  private async listarPorRespostas(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
+    const respostas = await this.carregarRespostas();
+    const candidatas = respostas.filter((r) =>
+      f.minhasQuestoes === "certas" ? r.correta : f.minhasQuestoes === "erradas" ? !r.correta : true,
+    );
+    const ids = candidatas.map((r) => r.questaoId).sort((a, b) => b - a);
+
+    const questoes = await this.buscarQuestoesPorId(ids);
+    const porId = new Map(questoes.map((q) => [q.id, q]));
+    const filtradas = ids.map((id) => porId.get(id)).filter((q): q is ItemQuestaoDynamo => !!q && casaFiltros(q, f));
+
     const inicio = (f.page - 1) * f.perPage;
-    const idsPagina = ids.slice(inicio, inicio + f.perPage);
+    const pagina = filtradas.slice(inicio, inicio + f.perPage);
+    const mapaRespostas = new Map(respostas.map((r) => [r.questaoId, r]));
 
-    // Só agora buscamos o corpo inteiro das questões — e só das ~20 a 100
-    // desta página, nunca do conjunto de candidatos inteiro.
-    const [questoesPagina, respostasPagina] = await Promise.all([
-      this.buscarQuestoesPorId(idsPagina),
-      mapaRespostas ? Promise.resolve(mapaRespostas) : this.buscarRespostasEmLote(idsPagina),
+    return {
+      total: filtradas.length,
+      totalExato: true,
+      temMais: inicio + f.perPage < filtradas.length,
+      page: f.page,
+      perPage: f.perPage,
+      rows: pagina.map((q) => this.converterQuestao(q, mapaRespostas.get(q.id))),
+    };
+  }
+
+  // Só agora busca o corpo inteiro das questões — e só das ~20 a 100 desta
+  // página, nunca do conjunto de candidatos inteiro.
+  private async montarLinhas(ids: number[]): Promise<Questao[]> {
+    if (!ids.length) return [];
+    const [questoes, respostas] = await Promise.all([
+      this.buscarQuestoesPorId(ids),
+      this.buscarRespostasEmLote(ids),
     ]);
-
-    const mapaQuestoes = new Map(questoesPagina.map((q) => [q.id, q]));
-    const rows = idsPagina
-      .map((id) => mapaQuestoes.get(id))
+    const porId = new Map(questoes.map((q) => [q.id, q]));
+    return ids
+      .map((id) => porId.get(id))
       .filter((item): item is ItemQuestaoDynamo => !!item)
-      .map((item) => this.converterQuestao(item, respostasPagina.get(item.id)));
-
-    return { total, page: f.page, perPage: f.perPage, rows };
+      .map((item) => this.converterQuestao(item, respostas.get(item.id)));
   }
 
   async responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null> {
@@ -529,15 +813,19 @@ export class RepositorioDynamo implements Repositorio {
       }),
     );
 
+    // Sem isso o filtro "não resolvidas" continuaria mostrando esta questão
+    // por até 60s (TTL do cache).
+    this.cacheRespostas = null;
     return { correta, respostaCorretaId: questao.respostaItemId };
   }
 
   async resetarResposta(questaoId: number): Promise<void> {
     await getCliente().send(new DeleteCommand({ TableName: TABELA_RESPOSTAS, Key: { questaoId } }));
+    this.cacheRespostas = null;
   }
 
   async estatisticas(): Promise<Estatisticas> {
-    const todas = await scanCompleto<ItemResposta>({ TableName: TABELA_RESPOSTAS });
+    const todas = await this.carregarRespostas();
     const respondidas = todas.length;
     const certas = todas.filter((r) => r.correta).length;
     const erradas = respondidas - certas;
@@ -550,8 +838,7 @@ export class RepositorioDynamo implements Repositorio {
       porDisciplinaMapa.set(r.disciplinaId, atual);
     }
 
-    const mapaLookups = await this.carregarLookups();
-    const nomesPorId = new Map((mapaLookups.get("disciplina") ?? []).map((d) => [d.id, d.nome]));
+    const nomesPorId = new Map((await this.lookups("disciplina")).map((d) => [d.id, d.nome]));
 
     const porDisciplina = [...porDisciplinaMapa.entries()]
       .map(([id, v]) => ({
