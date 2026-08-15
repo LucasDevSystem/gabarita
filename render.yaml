@@ -14,7 +14,7 @@ services:
     runtime: node
     plan: free
     rootDir: app
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    buildCommand: npm install -g pnpm@11 && pnpm install --frozen-lockfile && pnpm build
     startCommand: pnpm start
     healthCheckPath: /api/filtros
     envVars:
