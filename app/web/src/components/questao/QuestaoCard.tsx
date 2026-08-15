@@ -1,7 +1,7 @@
 import { useState } from "react";
 import DOMPurify from "dompurify";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, RotateCcw, Scissors, X } from "lucide-react";
+import { Check, Loader2, RotateCcw, Scissors, X } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -168,7 +168,9 @@ export function QuestaoCard({ questao }: { questao: Questao }) {
             <Button
               onClick={() => selecionado != null && mutResponder.mutate(selecionado)}
               disabled={selecionado == null || mutResponder.isPending}
+              className="gap-1.5"
             >
+              {mutResponder.isPending && <Loader2 className="size-3.5 animate-spin" />}
               Responder
             </Button>
           </div>
@@ -191,7 +193,11 @@ export function QuestaoCard({ questao }: { questao: Questao }) {
               onClick={() => mutResetar.mutate()}
               disabled={mutResetar.isPending}
             >
-              <RotateCcw className="size-3.5" />
+              {mutResetar.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="size-3.5" />
+              )}
               Refazer
             </Button>
           </div>

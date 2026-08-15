@@ -242,7 +242,8 @@ export class RepositorioDynamo implements Repositorio {
   capacidades: Capacidades = { ordenacaoPorDificuldade: false };
 
   private cacheLookups: Map<string, ItemLookup[]> | null = null;
-  private cacheCandidatos = new Map<string, { expira: number; itens: ItemQuestaoDynamo[] }>();
+  // Só os ids ficam em cache (não os registros inteiros) — ver buscarIdsCandidatos.
+  private cacheCandidatos = new Map<string, { expira: number; ids: number[] }>();
   private readonly TTL_CACHE_MS = 60_000;
 
   private async carregarLookups(): Promise<Map<string, ItemLookup[]>> {
@@ -295,44 +296,75 @@ export class RepositorioDynamo implements Repositorio {
       .map((i) => ({ id: i.id, nome: i.nome, qtdQuestoes: i.qtdQuestoes }));
   }
 
-  private async buscarCandidatos(f: FiltrosQuery): Promise<ItemQuestaoDynamo[]> {
+  // Traz só o "id" de cada questão que bate com os filtros — nunca o corpo
+  // inteiro (enunciado, itens, provas) para o conjunto inteiro de candidatos.
+  // Isso é o que mantém uma Scan sem disciplina segura em memória: ~100 mil
+  // ids cabem em menos de 1MB, enquanto ~100 mil registros completos passam
+  // de 200-500MB — o suficiente pra estourar os 512MB do plano free do
+  // Render (foi exatamente isso que causava os 502 intermitentes). Os
+  // registros completos só são buscados depois, já filtrados pra só os ~20
+  // a 100 ids que realmente vão pra página pedida (ver listarQuestoes).
+  private async buscarIdsCandidatos(f: FiltrosQuery): Promise<number[]> {
     const assinatura = JSON.stringify({ ...f, page: undefined, perPage: undefined });
     const cache = this.cacheCandidatos.get(assinatura);
-    if (cache && cache.expira > Date.now()) return cache.itens;
+    if (cache && cache.expira > Date.now()) return cache.ids;
 
     const { FilterExpression, ExpressionAttributeNames, ExpressionAttributeValues } =
       montarFilterExpression(f);
+    const nomesComId = { ...ExpressionAttributeNames, "#id": "id" };
 
-    let itens: ItemQuestaoDynamo[];
+    let ids: number[];
     if (f.disciplina.length) {
       const porDisciplina = await Promise.all(
         f.disciplina.map((disciplinaId) =>
-          queryCompleto<ItemQuestaoDynamo>({
+          queryCompleto<{ id: number }>({
             TableName: TABELA_QUESTOES,
             IndexName: INDICE_DISCIPLINA,
             KeyConditionExpression: "disciplinaId = :disc",
             FilterExpression,
-            ExpressionAttributeNames,
+            ProjectionExpression: "#id",
+            ExpressionAttributeNames: nomesComId,
             ExpressionAttributeValues: { ...ExpressionAttributeValues, ":disc": disciplinaId },
           }),
         ),
       );
-      itens = porDisciplina.flat();
+      ids = porDisciplina.flat().map((i) => i.id);
     } else {
-      itens = await scanCompletoParalelo<ItemQuestaoDynamo>({
+      const leves = await scanCompletoParalelo<{ id: number }>({
         TableName: TABELA_QUESTOES,
         FilterExpression,
-        ExpressionAttributeNames,
+        ProjectionExpression: "#id",
+        ExpressionAttributeNames: nomesComId,
         ExpressionAttributeValues,
       });
+      ids = leves.map((i) => i.id);
     }
 
     // Sem GSI de dificuldade nesse desenho "simples" — ordena sempre por id
     // (proxy de mais recente); capacidades.ordenacaoPorDificuldade=false diz
     // ao frontend pra não oferecer as opções de ordenar por dificuldade.
-    itens.sort((a, b) => b.id - a.id);
+    ids.sort((a, b) => b - a);
 
-    this.cacheCandidatos.set(assinatura, { expira: Date.now() + this.TTL_CACHE_MS, itens });
+    // Trava simples contra o cache crescer sem limite se muitas combinações
+    // de filtro diferentes forem usadas dentro da mesma janela de 60s.
+    if (this.cacheCandidatos.size > 50) this.cacheCandidatos.clear();
+    this.cacheCandidatos.set(assinatura, { expira: Date.now() + this.TTL_CACHE_MS, ids });
+    return ids;
+  }
+
+  private async buscarQuestoesPorId(ids: number[]): Promise<ItemQuestaoDynamo[]> {
+    if (!ids.length) return [];
+    const doc = getCliente();
+    const itens: ItemQuestaoDynamo[] = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      const lote = ids.slice(i, i + 100);
+      const res = await doc.send(
+        new BatchGetCommand({
+          RequestItems: { [TABELA_QUESTOES]: { Keys: lote.map((id) => ({ id })) } },
+        }),
+      );
+      itens.push(...((res.Responses?.[TABELA_QUESTOES] as ItemQuestaoDynamo[]) ?? []));
+    }
     return itens;
   }
 
@@ -377,13 +409,13 @@ export class RepositorioDynamo implements Repositorio {
   }
 
   async listarQuestoes(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
-    let itens = await this.buscarCandidatos(f);
+    let ids = await this.buscarIdsCandidatos(f);
 
     let mapaRespostas: Map<number, ItemResposta> | null = null;
     if (f.minhasQuestoes) {
-      mapaRespostas = await this.buscarRespostasEmLote(itens.map((i) => i.id));
-      itens = itens.filter((item) => {
-        const r = mapaRespostas!.get(item.id);
+      mapaRespostas = await this.buscarRespostasEmLote(ids);
+      ids = ids.filter((id) => {
+        const r = mapaRespostas!.get(id);
         switch (f.minhasQuestoes) {
           case "resolvidas":
             return !!r;
@@ -399,12 +431,22 @@ export class RepositorioDynamo implements Repositorio {
       });
     }
 
-    const total = itens.length;
+    const total = ids.length;
     const inicio = (f.page - 1) * f.perPage;
-    const pagina = itens.slice(inicio, inicio + f.perPage);
+    const idsPagina = ids.slice(inicio, inicio + f.perPage);
 
-    const respostasPagina = mapaRespostas ?? (await this.buscarRespostasEmLote(pagina.map((i) => i.id)));
-    const rows = pagina.map((item) => this.converterQuestao(item, respostasPagina.get(item.id)));
+    // Só agora buscamos o corpo inteiro das questões — e só das ~20 a 100
+    // desta página, nunca do conjunto de candidatos inteiro.
+    const [questoesPagina, respostasPagina] = await Promise.all([
+      this.buscarQuestoesPorId(idsPagina),
+      mapaRespostas ? Promise.resolve(mapaRespostas) : this.buscarRespostasEmLote(idsPagina),
+    ]);
+
+    const mapaQuestoes = new Map(questoesPagina.map((q) => [q.id, q]));
+    const rows = idsPagina
+      .map((id) => mapaQuestoes.get(id))
+      .filter((item): item is ItemQuestaoDynamo => !!item)
+      .map((item) => this.converterQuestao(item, respostasPagina.get(item.id)));
 
     return { total, page: f.page, perPage: f.perPage, rows };
   }

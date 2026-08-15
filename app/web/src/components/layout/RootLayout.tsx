@@ -1,10 +1,25 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { useIsFetching, useIsMutating } from "@tanstack/react-query";
 import { Moon, Sun, BarChart3, ListChecks } from "lucide-react";
 import { Logo } from "./Logo";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { FILTROS_PADRAO } from "@/router";
+
+function BarraCarregando() {
+  const emFetch = useIsFetching();
+  const emMutacao = useIsMutating();
+  const carregando = emFetch + emMutacao > 0;
+
+  return (
+    <div className="bg-border/40 relative h-0.5 w-full overflow-hidden">
+      {carregando && (
+        <div className="barra-carregando bg-primary absolute inset-y-0 left-0 w-1/3 rounded-full" />
+      )}
+    </div>
+  );
+}
 
 export function RootLayout() {
   const { tema, alternar } = useTheme();
@@ -50,6 +65,7 @@ export function RootLayout() {
             </Button>
           </nav>
         </div>
+        <BarraCarregando />
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">

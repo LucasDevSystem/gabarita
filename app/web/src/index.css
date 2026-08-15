@@ -137,3 +137,19 @@
     @apply font-sans;
     }
 }
+
+@keyframes barra-carregando {
+  0% {
+    transform: translateX(-40%) scaleX(0.4);
+  }
+  50% {
+    transform: translateX(50%) scaleX(0.6);
+  }
+  100% {
+    transform: translateX(140%) scaleX(0.4);
+  }
+}
+
+.barra-carregando {
+  animation: barra-carregando 1.1s ease-in-out infinite;
+}

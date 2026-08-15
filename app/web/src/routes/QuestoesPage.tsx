@@ -1,6 +1,6 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, SearchX } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, SearchX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -13,6 +13,7 @@ import {
 import { FiltroBarra } from "@/components/filtros/FiltroBarra";
 import { QuestaoCard } from "@/components/questao/QuestaoCard";
 import { buscarFiltrosBase, buscarQuestoes } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import type { FiltrosState } from "@/lib/types";
 
 export function QuestoesPage() {
@@ -50,7 +51,12 @@ export function QuestoesPage() {
           ) : (
             "Carregando..."
           )}
-          {isFetching && !isLoading && <span className="ml-1 opacity-60">· atualizando</span>}
+          {isFetching && !isLoading && (
+            <span className="text-muted-foreground ml-1.5 inline-flex items-center gap-1 align-middle">
+              <Loader2 className="size-3.5 animate-spin" />
+              atualizando
+            </span>
+          )}
         </p>
 
         <div className="flex items-center gap-2">
@@ -102,7 +108,12 @@ export function QuestoesPage() {
           <p>Nenhuma questão encontrada com esses filtros.</p>
         </div>
       ) : (
-        <div className="space-y-4">
+        <div
+          className={cn(
+            "space-y-4 transition-opacity",
+            isFetching && !isLoading && "opacity-50",
+          )}
+        >
           {data?.rows.map((questao) => (
             <QuestaoCard key={questao.id} questao={questao} />
           ))}
