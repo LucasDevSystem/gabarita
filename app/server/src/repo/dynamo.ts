@@ -104,6 +104,43 @@ async function scanCompleto<T>(params: ScanCommandInput): Promise<T[]> {
   return itens;
 }
 
+// Fallback quando nenhuma disciplina é escolhida (ver buscarCandidatos): sem
+// GSI pra esse caso, a única opção é varrer a tabela inteira. Uma Scan
+// sequencial em ~100 mil itens percorre a tabela página por página (~1MB
+// cada) uma de cada vez — lento o bastante pra doer numa requisição HTTP. O
+// parâmetro nativo Segment/TotalSegments do DynamoDB permite varrer pedaços
+// da tabela em paralelo; isso não reduz o RCU total consumido, mas corta o
+// tempo de parede quase que linearmente com o número de segmentos, porque o
+// gargalo real é esperar a rede, não CPU (então paraleliza bem mesmo numa
+// instância de 1 vCPU do Render).
+const SEGMENTOS_SCAN_PARALELO = 8;
+
+async function scanCompletoParalelo<T>(
+  params: Omit<ScanCommandInput, "Segment" | "TotalSegments">,
+): Promise<T[]> {
+  const doc = getCliente();
+  const porSegmento = await Promise.all(
+    Array.from({ length: SEGMENTOS_SCAN_PARALELO }, async (_, Segment) => {
+      const itens: T[] = [];
+      let ExclusiveStartKey: ScanCommandInput["ExclusiveStartKey"];
+      do {
+        const res = await doc.send(
+          new ScanCommand({
+            ...params,
+            Segment,
+            TotalSegments: SEGMENTOS_SCAN_PARALELO,
+            ExclusiveStartKey,
+          }),
+        );
+        itens.push(...((res.Items as T[]) ?? []));
+        ExclusiveStartKey = res.LastEvaluatedKey;
+      } while (ExclusiveStartKey);
+      return itens;
+    }),
+  );
+  return porSegmento.flat();
+}
+
 async function queryCompleto<T>(params: QueryCommandInput): Promise<T[]> {
   const doc = getCliente();
   const itens: T[] = [];
@@ -282,7 +319,7 @@ export class RepositorioDynamo implements Repositorio {
       );
       itens = porDisciplina.flat();
     } else {
-      itens = await scanCompleto<ItemQuestaoDynamo>({
+      itens = await scanCompletoParalelo<ItemQuestaoDynamo>({
         TableName: TABELA_QUESTOES,
         FilterExpression,
         ExpressionAttributeNames,
