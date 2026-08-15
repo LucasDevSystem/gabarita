@@ -28,30 +28,30 @@ export function RootLayout() {
   return (
     <div className="bg-background text-foreground min-h-svh">
       <header className="border-border/60 bg-background/80 sticky top-0 z-40 border-b backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-4 px-4">
-          <Link to="/" search={FILTROS_PADRAO}>
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 px-3 sm:gap-4 sm:px-4">
+          <Link to="/" search={FILTROS_PADRAO} className="shrink-0">
             <Logo />
           </Link>
 
-          <nav className="flex items-center gap-1">
+          <nav className="flex shrink-0 items-center gap-1">
             <Link to="/" search={FILTROS_PADRAO}>
               <Button
                 variant={pathname === "/" ? "secondary" : "ghost"}
                 size="sm"
-                className="gap-1.5"
+                className="gap-1.5 px-2 sm:px-3"
               >
                 <ListChecks className="size-4" />
-                Questões
+                <span className="hidden sm:inline">Questões</span>
               </Button>
             </Link>
             <Link to="/estatisticas">
               <Button
                 variant={pathname === "/estatisticas" ? "secondary" : "ghost"}
                 size="sm"
-                className="gap-1.5"
+                className="gap-1.5 px-2 sm:px-3"
               >
                 <BarChart3 className="size-4" />
-                Estatísticas
+                <span className="hidden sm:inline">Estatísticas</span>
               </Button>
             </Link>
             <Button

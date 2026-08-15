@@ -169,8 +169,36 @@ export class RepositorioSqlite implements Repositorio {
     return { disciplinas, carreiras, areas, anos, dificuldades, escolaridades, tipos };
   }
 
-  async buscarLookup(tipo: LookupTipo, q: string, limit: number): Promise<OpcaoFiltro[]> {
+  async buscarLookup(
+    tipo: LookupTipo,
+    q: string,
+    limit: number,
+    disciplinaIds?: number[],
+  ): Promise<OpcaoFiltro[]> {
     const db = getDb();
+
+    // Assunto só faz sentido escopado a uma disciplina — sem isso, devolve
+    // vazio (o frontend nem deveria chamar esse caminho, mas reforça a regra
+    // no servidor também). A contagem também é recalculada só dentro da(s)
+    // disciplina(s) escolhida(s), não o total global do assunto.
+    if (tipo === "assuntos") {
+      if (!disciplinaIds?.length) return [];
+      const placeholders = disciplinaIds.map(() => "?").join(",");
+      const sql = `
+        SELECT a.id, a.nome, COUNT(DISTINCT qa.questao_id) AS qtdQuestoes
+        FROM assuntos a
+        JOIN questao_assuntos qa ON qa.assunto_id = a.id
+        JOIN questoes qu ON qu.id = qa.questao_id
+        WHERE qu.disciplina_id IN (${placeholders})
+        ${q ? "AND a.nome LIKE ?" : ""}
+        GROUP BY a.id, a.nome
+        ORDER BY qtdQuestoes DESC
+        LIMIT ?
+      `;
+      const params = q ? [...disciplinaIds, `%${q}%`, limit] : [...disciplinaIds, limit];
+      return db.prepare(sql).all(...params) as unknown as OpcaoFiltro[];
+    }
+
     const { tabela, coluna } = LOOKUP_TABELAS[tipo];
     const sql = q
       ? `SELECT id, ${coluna} AS nome, qtd_questoes AS qtdQuestoes FROM ${tabela}

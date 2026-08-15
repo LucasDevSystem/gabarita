@@ -20,9 +20,14 @@ export function buscarFiltrosBase(): Promise<FiltrosBase> {
 const LOOKUPS = ["bancas", "orgaos", "cargos", "assuntos"] as const;
 export type LookupFiltro = (typeof LOOKUPS)[number];
 
-export function buscarLookup(tipo: LookupFiltro, q = ""): Promise<OpcaoFiltro[]> {
+export function buscarLookup(
+  tipo: LookupFiltro,
+  q = "",
+  disciplina: number[] = [],
+): Promise<OpcaoFiltro[]> {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
+  if (disciplina.length) params.set("disciplina", disciplina.join(","));
   return getJson(`/api/filtros/${tipo}?${params.toString()}`);
 }
 

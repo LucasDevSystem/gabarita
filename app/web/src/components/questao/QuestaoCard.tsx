@@ -112,7 +112,7 @@ export function QuestaoCard({ questao }: { questao: Questao }) {
                     aria-label="Riscar alternativa"
                     title="Riscar alternativa"
                     className={cn(
-                      "border-border/70 flex w-9 shrink-0 items-center justify-center border-r transition-colors",
+                      "border-border/70 flex w-9 shrink-0 items-start justify-center border-r pt-3 transition-colors",
                       riscado
                         ? "bg-muted text-foreground"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",

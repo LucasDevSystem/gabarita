@@ -244,7 +244,43 @@ export class RepositorioDynamo implements Repositorio {
   private cacheLookups: Map<string, ItemLookup[]> | null = null;
   // Só os ids ficam em cache (não os registros inteiros) — ver buscarIdsCandidatos.
   private cacheCandidatos = new Map<string, { expira: number; ids: number[] }>();
+  private cacheAssuntosPorDisciplina = new Map<string, { expira: number; contagens: Map<number, number> }>();
   private readonly TTL_CACHE_MS = 60_000;
+
+  // Sem tabela de junção questão-assunto nesse desenho "simples" — pra saber
+  // quais assuntos existem (e quantas questões cada um tem) dentro de uma
+  // disciplina, consulta o GSI da disciplina pedindo só o atributo
+  // "assuntoIds" (leve, não traz o corpo da questão) e agrega em memória.
+  private async contarAssuntosPorDisciplina(disciplinaIds: number[]): Promise<Map<number, number>> {
+    const chave = [...disciplinaIds].sort((a, b) => a - b).join(",");
+    const cache = this.cacheAssuntosPorDisciplina.get(chave);
+    if (cache && cache.expira > Date.now()) return cache.contagens;
+
+    const porDisciplina = await Promise.all(
+      disciplinaIds.map((disciplinaId) =>
+        queryCompleto<{ assuntoIds?: number[] }>({
+          TableName: TABELA_QUESTOES,
+          IndexName: INDICE_DISCIPLINA,
+          KeyConditionExpression: "disciplinaId = :disc",
+          ProjectionExpression: "assuntoIds",
+          ExpressionAttributeValues: { ":disc": disciplinaId },
+        }),
+      ),
+    );
+
+    const contagens = new Map<number, number>();
+    for (const lista of porDisciplina) {
+      for (const item of lista) {
+        for (const assuntoId of item.assuntoIds ?? []) {
+          contagens.set(assuntoId, (contagens.get(assuntoId) ?? 0) + 1);
+        }
+      }
+    }
+
+    if (this.cacheAssuntosPorDisciplina.size > 50) this.cacheAssuntosPorDisciplina.clear();
+    this.cacheAssuntosPorDisciplina.set(chave, { expira: Date.now() + this.TTL_CACHE_MS, contagens });
+    return contagens;
+  }
 
   private async carregarLookups(): Promise<Map<string, ItemLookup[]>> {
     if (this.cacheLookups) return this.cacheLookups;
@@ -285,10 +321,31 @@ export class RepositorioDynamo implements Repositorio {
     };
   }
 
-  async buscarLookup(tipo: LookupTipo, q: string, limit: number): Promise<OpcaoFiltro[]> {
+  async buscarLookup(
+    tipo: LookupTipo,
+    q: string,
+    limit: number,
+    disciplinaIds?: number[],
+  ): Promise<OpcaoFiltro[]> {
+    const termo = q.trim().toLowerCase();
+
+    if (tipo === "assuntos") {
+      if (!disciplinaIds?.length) return [];
+      const [contagens, mapaLookups] = await Promise.all([
+        this.contarAssuntosPorDisciplina(disciplinaIds),
+        this.carregarLookups(),
+      ]);
+      const nomesAssuntos = new Map((mapaLookups.get("assunto") ?? []).map((i) => [i.id, i.nome]));
+
+      return [...contagens.entries()]
+        .map(([id, qtdQuestoes]) => ({ id, nome: nomesAssuntos.get(id) ?? `Assunto ${id}`, qtdQuestoes }))
+        .filter((o) => !termo || o.nome.toLowerCase().includes(termo))
+        .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)
+        .slice(0, limit);
+    }
+
     const mapa = await this.carregarLookups();
     const lista = mapa.get(LOOKUP_TIPO[tipo]) ?? [];
-    const termo = q.trim().toLowerCase();
     return lista
       .filter((i) => i.qtdQuestoes > 0 && (!termo || i.nome.toLowerCase().includes(termo)))
       .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)

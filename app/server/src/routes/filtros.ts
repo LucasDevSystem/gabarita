@@ -5,12 +5,22 @@ import type { LookupTipo } from "../repo/types.js";
 interface BuscaQuery {
   q?: string;
   limit?: string;
+  disciplina?: string;
 }
+
+const ints = (v?: string) =>
+  v
+    ? v
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n))
+    : [];
 
 function registrarBuscaLookup(app: FastifyInstance, rota: string, tipo: LookupTipo) {
   app.get<{ Querystring: BuscaQuery }>(rota, async (req) => {
     const limit = Math.min(Number(req.query.limit) || 30, 100);
-    return repo.buscarLookup(tipo, req.query.q?.trim() ?? "", limit);
+    const disciplinaIds = ints(req.query.disciplina);
+    return repo.buscarLookup(tipo, req.query.q?.trim() ?? "", limit, disciplinaIds);
   });
 }
 

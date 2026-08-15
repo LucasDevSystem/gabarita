@@ -7,6 +7,7 @@ import { Separator } from "@/components/ui/separator";
 import { buscarFiltrosBase, buscarLookup } from "@/lib/api";
 import type { FiltrosState } from "@/lib/types";
 import { FILTROS_PADRAO } from "@/router";
+import { FiltrosSalvos } from "./FiltrosSalvos";
 import { SeletorMultiplo } from "./SeletorMultiplo";
 
 interface FiltroBarraProps {
@@ -56,33 +57,38 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
 
   return (
     <div className="bg-card border-border/60 space-y-4 rounded-xl border p-4">
-      <div className="relative">
-        <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-        <Input
-          value={filtros.q}
-          onChange={(e) => aoMudar({ q: e.target.value, page: 1 })}
-          placeholder="Pesquisar no enunciado das questões..."
-          className="pl-9"
-        />
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+          <Input
+            value={filtros.q}
+            onChange={(e) => aoMudar({ q: e.target.value, page: 1 })}
+            placeholder="Pesquisar no enunciado das questões..."
+            className="pl-9"
+          />
+        </div>
+        <FiltrosSalvos filtrosAtuais={filtros} aoAplicar={aoMudar} />
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         <SeletorMultiplo
           label="Disciplina"
           valores={filtros.disciplina}
-          aoMudar={(v) => aoMudar({ disciplina: v, page: 1 })}
+          aoMudar={(v) => aoMudar({ disciplina: v, assunto: [], page: 1 })}
           opcoes={base?.disciplinas.map((d) => ({ valor: d.id, rotulo: d.nome, qtd: d.qtdQuestoes })) ?? []}
         />
         <SeletorMultiplo
           label="Assunto"
           valores={filtros.assunto}
           aoMudar={(v) => aoMudar({ assunto: v, page: 1 })}
+          disabled={filtros.disciplina.length === 0}
+          dicaDesabilitado="Escolha a disciplina primeiro"
           buscar={(q) =>
-            buscarLookup("assuntos", q).then((r) =>
+            buscarLookup("assuntos", q, filtros.disciplina).then((r) =>
               r.map((o) => ({ valor: o.id, rotulo: o.nome, qtd: o.qtdQuestoes })),
             )
           }
-          chaveCache="assuntos"
+          chaveCache={`assuntos:${filtros.disciplina.join(",")}`}
         />
         <SeletorMultiplo
           label="Banca"
@@ -169,6 +175,7 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
             type="multiple"
             variant="outline"
             size="sm"
+            className="flex-wrap"
             value={filtros.tipo}
             onValueChange={(v) => aoMudar({ tipo: v, page: 1 })}
           >
@@ -182,6 +189,7 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
             type="single"
             variant="outline"
             size="sm"
+            className="flex-wrap"
             value={filtros.minhasQuestoes === "todas" ? "" : filtros.minhasQuestoes}
             onValueChange={(v) =>
               aoMudar({ minhasQuestoes: (v || "todas") as FiltrosState["minhasQuestoes"], page: 1 })
@@ -199,6 +207,7 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
             type="multiple"
             variant="outline"
             size="sm"
+            className="flex-wrap"
             value={incluirValores}
             onValueChange={(v) =>
               aoMudar({
@@ -218,6 +227,7 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
             type="multiple"
             variant="outline"
             size="sm"
+            className="flex-wrap"
             value={filtros.comentarios}
             onValueChange={(v) => aoMudar({ comentarios: v, page: 1 })}
           >

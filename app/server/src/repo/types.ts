@@ -113,7 +113,15 @@ export interface Capacidades {
 export interface Repositorio {
   capacidades: Capacidades;
   filtrosBase(): Promise<FiltrosBase>;
-  buscarLookup(tipo: LookupTipo, q: string, limit: number): Promise<OpcaoFiltro[]>;
+  // disciplinaIds só é usado (e obrigatório na prática) pro tipo "assuntos" —
+  // assunto só faz sentido escopado a uma disciplina já escolhida. Os demais
+  // tipos de lookup ignoram esse parâmetro.
+  buscarLookup(
+    tipo: LookupTipo,
+    q: string,
+    limit: number,
+    disciplinaIds?: number[],
+  ): Promise<OpcaoFiltro[]>;
   listarQuestoes(filtros: FiltrosQuery): Promise<ListaQuestoesResultado>;
   responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null>;
   resetarResposta(questaoId: number): Promise<void>;

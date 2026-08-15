@@ -29,6 +29,8 @@ interface SeletorMultiploProps<T extends string | number> {
   buscar?: (q: string) => Promise<OpcaoSelecao<T>[]>;
   chaveCache?: string;
   className?: string;
+  disabled?: boolean;
+  dicaDesabilitado?: string;
 }
 
 export function SeletorMultiplo<T extends string | number>({
@@ -39,6 +41,8 @@ export function SeletorMultiplo<T extends string | number>({
   buscar,
   chaveCache,
   className,
+  disabled,
+  dicaDesabilitado,
 }: SeletorMultiploProps<T>) {
   const [aberto, setAberto] = useState(false);
   const [busca, setBusca] = useState("");
@@ -67,17 +71,19 @@ export function SeletorMultiplo<T extends string | number>({
 
   return (
     <div className={className}>
-      <Popover open={aberto} onOpenChange={setAberto}>
+      <Popover open={aberto && !disabled} onOpenChange={(v) => setAberto(v && !disabled)}>
         <PopoverTrigger asChild>
           <Button
             variant="outline"
             role="combobox"
             aria-expanded={aberto}
+            disabled={disabled}
+            title={disabled ? dicaDesabilitado : undefined}
             className="w-full justify-between font-normal"
           >
             <span className="truncate">
-              {label}
-              {valores.length > 0 && (
+              {disabled && dicaDesabilitado ? dicaDesabilitado : label}
+              {!disabled && valores.length > 0 && (
                 <span className="text-muted-foreground ml-1">({valores.length})</span>
               )}
             </span>
