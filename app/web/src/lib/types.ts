@@ -93,6 +93,20 @@ export interface Estatisticas {
   porDisciplina: { id: number; nome: string; respondidas: number; certas: number }[];
 }
 
+export interface Cliente {
+  guid: string;
+  nome: string;
+  nomePersonalizado: string | null;
+  criadoEm: string;
+  ultimoAcesso: string | null;
+}
+
+export interface ClienteComEstatisticas extends Cliente {
+  respondidas: number;
+  certas: number;
+  erradas: number;
+}
+
 export type MinhasQuestoes = "todas" | "resolvidas" | "naoresolvidas" | "certas" | "erradas";
 export type Anuladas = "excluir" | "incluir";
 

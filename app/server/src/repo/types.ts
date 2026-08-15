@@ -119,6 +119,22 @@ export interface Capacidades {
   ordenacaoPorDificuldade: boolean;
 }
 
+// Identidade de quem acessa via link de convite (?u=<guid>) — ver
+// middleware/auth.ts. Todo progresso de resposta é escopado a um cliente.
+export interface Cliente {
+  guid: string;
+  nome: string;
+  nomePersonalizado: string | null;
+  criadoEm: string;
+  ultimoAcesso: string | null;
+}
+
+export interface ClienteComEstatisticas extends Cliente {
+  respondidas: number;
+  certas: number;
+  erradas: number;
+}
+
 export interface Repositorio {
   capacidades: Capacidades;
   filtrosBase(): Promise<FiltrosBase>;
@@ -131,8 +147,16 @@ export interface Repositorio {
     limit: number,
     disciplinaIds?: number[],
   ): Promise<OpcaoFiltro[]>;
-  listarQuestoes(filtros: FiltrosQuery): Promise<ListaQuestoesResultado>;
-  responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null>;
-  resetarResposta(questaoId: number): Promise<void>;
-  estatisticas(): Promise<Estatisticas>;
+  listarQuestoes(clienteGuid: string, filtros: FiltrosQuery): Promise<ListaQuestoesResultado>;
+  responder(clienteGuid: string, questaoId: number, itemId: number): Promise<RespostaEnviada | null>;
+  resetarResposta(clienteGuid: string, questaoId: number): Promise<void>;
+  estatisticas(clienteGuid: string): Promise<Estatisticas>;
+
+  // Clientes (identidade de convite) — usado pelo middleware de auth e pelo
+  // painel /admin.
+  criarCliente(nome?: string): Promise<Cliente>;
+  listarClientes(): Promise<ClienteComEstatisticas[]>;
+  buscarCliente(guid: string): Promise<Cliente | null>;
+  atualizarNomePersonalizado(guid: string, nome: string): Promise<void>;
+  registrarAcesso(guid: string): Promise<void>;
 }

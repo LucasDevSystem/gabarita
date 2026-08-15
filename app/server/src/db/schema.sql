@@ -116,10 +116,26 @@ CREATE TABLE IF NOT EXISTS questao_anos (
   PRIMARY KEY (questao_id, ano)
 );
 
--- Local, single-user answer tracking (this app has no login — it's a personal study tool)
+-- Identidade de quem acessa via link de convite (?u=<guid>) — ver
+-- middleware/auth.ts. Cadastrado pelo painel /admin.
+CREATE TABLE IF NOT EXISTS clientes (
+  guid TEXT PRIMARY KEY,
+  nome TEXT NOT NULL,
+  nome_personalizado TEXT,
+  criado_em TEXT NOT NULL,
+  ultimo_acesso TEXT
+);
+
+-- Progresso de resposta, escopado por cliente. NOTA: isso é uma alteração de
+-- schema, não uma migração — CREATE TABLE IF NOT EXISTS não altera a PK de um
+-- app.db já existente. Se você tinha um app.db de antes dessa mudança
+-- (respostas sem cliente_guid), apague o arquivo (app/server/data/app.db) e
+-- deixe recriar do zero.
 CREATE TABLE IF NOT EXISTS respostas_usuario (
-  questao_id INTEGER PRIMARY KEY,
+  cliente_guid TEXT NOT NULL,
+  questao_id INTEGER NOT NULL,
   item_id INTEGER NOT NULL,
   correta INTEGER NOT NULL,
-  respondido_em TEXT NOT NULL
+  respondido_em TEXT NOT NULL,
+  PRIMARY KEY (cliente_guid, questao_id)
 );

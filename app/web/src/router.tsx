@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter } from "@tanstack/react-rout
 import { RootLayout } from "@/components/layout/RootLayout";
 import { QuestoesPage } from "@/routes/QuestoesPage";
 import { EstatisticasPage } from "@/routes/EstatisticasPage";
+import { AdminPage } from "@/routes/AdminPage";
 import type { FiltrosState, MinhasQuestoes } from "@/lib/types";
 
 export const FILTROS_PADRAO: FiltrosState = {
@@ -87,7 +88,13 @@ const estatisticasRoute = createRoute({
   component: EstatisticasPage,
 });
 
-const routeTree = rootRoute.addChildren([questoesRoute, estatisticasRoute]);
+const adminRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin",
+  component: AdminPage,
+});
+
+const routeTree = rootRoute.addChildren([questoesRoute, estatisticasRoute, adminRoute]);
 
 export const router = createRouter({ routeTree, defaultPreload: "intent" });
 

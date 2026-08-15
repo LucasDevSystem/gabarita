@@ -1,3 +1,7 @@
+// Precisa ser o primeiro import: captura o ?u=<guid> da URL antes que
+// qualquer outro módulo (em especial ./router, que lê window.location na
+// hora em que é avaliado) tenha chance de rodar.
+import "./lib/auth";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

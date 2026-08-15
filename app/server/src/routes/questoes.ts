@@ -71,13 +71,13 @@ function parseFiltros(query: ListaQuery): FiltrosQuery {
 
 export function registrarRotasQuestoes(app: FastifyInstance) {
   app.get<{ Querystring: ListaQuery }>("/api/questoes", async (req) => {
-    return repo.listarQuestoes(parseFiltros(req.query));
+    return repo.listarQuestoes(req.cliente!.guid, parseFiltros(req.query));
   });
 
   app.post<{ Params: { id: string }; Body: { itemId: number } }>(
     "/api/questoes/:id/responder",
     async (req, reply) => {
-      const resultado = await repo.responder(Number(req.params.id), req.body.itemId);
+      const resultado = await repo.responder(req.cliente!.guid, Number(req.params.id), req.body.itemId);
       if (!resultado) {
         return reply.code(404).send({ erro: "Questão não encontrada" });
       }
@@ -86,7 +86,7 @@ export function registrarRotasQuestoes(app: FastifyInstance) {
   );
 
   app.delete<{ Params: { id: string } }>("/api/questoes/:id/responder", async (req) => {
-    await repo.resetarResposta(Number(req.params.id));
+    await repo.resetarResposta(req.cliente!.guid, Number(req.params.id));
     return { ok: true };
   });
 }

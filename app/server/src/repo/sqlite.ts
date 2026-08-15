@@ -1,6 +1,8 @@
 import { getDb } from "../db/index.js";
 import type {
   Capacidades,
+  Cliente,
+  ClienteComEstatisticas,
   Estatisticas,
   FiltrosBase,
   FiltrosQuery,
@@ -211,16 +213,18 @@ export class RepositorioSqlite implements Repositorio {
     return db.prepare(sql).all(...params) as unknown as OpcaoFiltro[];
   }
 
-  async listarQuestoes(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
+  async listarQuestoes(clienteGuid: string, f: FiltrosQuery): Promise<ListaQuestoesResultado> {
     const db = getDb();
     const { whereSql, params } = montarFiltros(f);
     const offset = (f.page - 1) * f.perPage;
 
     const totalRow = db
       .prepare(
-        `SELECT COUNT(*) AS total FROM questoes q LEFT JOIN respostas_usuario ru ON ru.questao_id = q.id ${whereSql}`,
+        `SELECT COUNT(*) AS total FROM questoes q
+         LEFT JOIN respostas_usuario ru ON ru.questao_id = q.id AND ru.cliente_guid = ?
+         ${whereSql}`,
       )
-      .get(...params) as { total: number };
+      .get(clienteGuid, ...params) as { total: number };
 
     const rows = db
       .prepare(
@@ -237,12 +241,12 @@ export class RepositorioSqlite implements Repositorio {
            ru.respondido_em AS minhaRespostaEm
          FROM questoes q
          JOIN disciplinas d ON d.id = q.disciplina_id
-         LEFT JOIN respostas_usuario ru ON ru.questao_id = q.id
+         LEFT JOIN respostas_usuario ru ON ru.questao_id = q.id AND ru.cliente_guid = ?
          ${whereSql}
          ${ordemSql(f.sort)}
          LIMIT ? OFFSET ?`,
       )
-      .all(...params, f.perPage, offset) as Record<string, unknown>[];
+      .all(clienteGuid, ...params, f.perPage, offset) as Record<string, unknown>[];
 
     const parsed = rows.map((r) => {
       const jaRespondida = r.minhaRespostaItemId != null;
@@ -289,7 +293,7 @@ export class RepositorioSqlite implements Repositorio {
     };
   }
 
-  async responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null> {
+  async responder(clienteGuid: string, questaoId: number, itemId: number): Promise<RespostaEnviada | null> {
     const db = getDb();
     const questao = db
       .prepare("SELECT resposta_item_id AS respostaItemId FROM questoes WHERE id = ?")
@@ -300,26 +304,28 @@ export class RepositorioSqlite implements Repositorio {
     const correta = questao.respostaItemId != null && itemId === questao.respostaItemId;
 
     db.prepare(
-      `INSERT INTO respostas_usuario (questao_id, item_id, correta, respondido_em)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(questao_id) DO UPDATE SET item_id = excluded.item_id, correta = excluded.correta, respondido_em = excluded.respondido_em`,
-    ).run(questaoId, itemId, correta ? 1 : 0, new Date().toISOString());
+      `INSERT INTO respostas_usuario (cliente_guid, questao_id, item_id, correta, respondido_em)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(cliente_guid, questao_id) DO UPDATE SET item_id = excluded.item_id, correta = excluded.correta, respondido_em = excluded.respondido_em`,
+    ).run(clienteGuid, questaoId, itemId, correta ? 1 : 0, new Date().toISOString());
 
     return { correta, respostaCorretaId: questao.respostaItemId };
   }
 
-  async resetarResposta(questaoId: number): Promise<void> {
-    getDb().prepare("DELETE FROM respostas_usuario WHERE questao_id = ?").run(questaoId);
+  async resetarResposta(clienteGuid: string, questaoId: number): Promise<void> {
+    getDb()
+      .prepare("DELETE FROM respostas_usuario WHERE cliente_guid = ? AND questao_id = ?")
+      .run(clienteGuid, questaoId);
   }
 
-  async estatisticas(): Promise<Estatisticas> {
+  async estatisticas(clienteGuid: string): Promise<Estatisticas> {
     const db = getDb();
     const geral = db
       .prepare(
         `SELECT COUNT(*) AS respondidas, SUM(correta) AS certas, COUNT(*) - SUM(correta) AS erradas
-         FROM respostas_usuario`,
+         FROM respostas_usuario WHERE cliente_guid = ?`,
       )
-      .get() as { respondidas: number; certas: number | null; erradas: number | null };
+      .get(clienteGuid) as { respondidas: number; certas: number | null; erradas: number | null };
 
     const porDisciplina = db
       .prepare(
@@ -327,10 +333,11 @@ export class RepositorioSqlite implements Repositorio {
          FROM respostas_usuario ru
          JOIN questoes q ON q.id = ru.questao_id
          JOIN disciplinas d ON d.id = q.disciplina_id
+         WHERE ru.cliente_guid = ?
          GROUP BY d.id
          ORDER BY respondidas DESC`,
       )
-      .all() as Estatisticas["porDisciplina"];
+      .all(clienteGuid) as Estatisticas["porDisciplina"];
 
     return {
       respondidas: geral.respondidas,
@@ -339,5 +346,67 @@ export class RepositorioSqlite implements Repositorio {
       percentualAcerto: geral.respondidas > 0 ? ((geral.certas ?? 0) / geral.respondidas) * 100 : 0,
       porDisciplina,
     };
+  }
+
+  async criarCliente(nome?: string): Promise<Cliente> {
+    const db = getDb();
+    const guid = crypto.randomUUID();
+    const criadoEm = new Date().toISOString();
+    const nomeFinal = nome?.trim() || "Cliente novo";
+    db.prepare(
+      "INSERT INTO clientes (guid, nome, nome_personalizado, criado_em, ultimo_acesso) VALUES (?, ?, NULL, ?, NULL)",
+    ).run(guid, nomeFinal, criadoEm);
+    return { guid, nome: nomeFinal, nomePersonalizado: null, criadoEm, ultimoAcesso: null };
+  }
+
+  async listarClientes(): Promise<ClienteComEstatisticas[]> {
+    const db = getDb();
+    const rows = db
+      .prepare(
+        `SELECT c.guid, c.nome, c.nome_personalizado AS nomePersonalizado, c.criado_em AS criadoEm,
+                c.ultimo_acesso AS ultimoAcesso,
+                COUNT(ru.questao_id) AS respondidas,
+                COALESCE(SUM(ru.correta), 0) AS certas
+         FROM clientes c
+         LEFT JOIN respostas_usuario ru ON ru.cliente_guid = c.guid
+         GROUP BY c.guid
+         ORDER BY c.criado_em DESC`,
+      )
+      .all() as Record<string, unknown>[];
+
+    return rows.map((r) => {
+      const respondidas = r.respondidas as number;
+      const certas = r.certas as number;
+      return {
+        guid: r.guid as string,
+        nome: r.nome as string,
+        nomePersonalizado: r.nomePersonalizado as string | null,
+        criadoEm: r.criadoEm as string,
+        ultimoAcesso: r.ultimoAcesso as string | null,
+        respondidas,
+        certas,
+        erradas: respondidas - certas,
+      };
+    });
+  }
+
+  async buscarCliente(guid: string): Promise<Cliente | null> {
+    const db = getDb();
+    const row = db
+      .prepare(
+        `SELECT guid, nome, nome_personalizado AS nomePersonalizado, criado_em AS criadoEm,
+                ultimo_acesso AS ultimoAcesso
+         FROM clientes WHERE guid = ?`,
+      )
+      .get(guid) as Cliente | undefined;
+    return row ?? null;
+  }
+
+  async atualizarNomePersonalizado(guid: string, nome: string): Promise<void> {
+    getDb().prepare("UPDATE clientes SET nome_personalizado = ? WHERE guid = ?").run(nome.trim(), guid);
+  }
+
+  async registrarAcesso(guid: string): Promise<void> {
+    getDb().prepare("UPDATE clientes SET ultimo_acesso = ? WHERE guid = ?").run(new Date().toISOString(), guid);
   }
 }

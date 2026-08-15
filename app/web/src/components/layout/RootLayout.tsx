@@ -1,10 +1,14 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { useIsFetching, useIsMutating } from "@tanstack/react-query";
-import { Moon, Sun, BarChart3, ListChecks } from "lucide-react";
+import { useIsFetching, useIsMutating, useQuery } from "@tanstack/react-query";
+import { Moon, Sun, BarChart3, ListChecks, Loader2 } from "lucide-react";
 import { Logo } from "./Logo";
+import { AcessoRestrito } from "./AcessoRestrito";
+import { NomeDialog } from "./NomeDialog";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { tokenCliente } from "@/lib/auth";
+import { buscarEu } from "@/lib/api";
 import { FILTROS_PADRAO } from "@/router";
 
 function BarraCarregando() {
@@ -24,6 +28,33 @@ function BarraCarregando() {
 export function RootLayout() {
   const { tema, alternar } = useTheme();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const ehAdmin = pathname.startsWith("/admin");
+
+  // /admin tem seu próprio gate (token de admin, não de cliente) e sua
+  // própria tela — não passa pelo cabeçalho/nav do app comum.
+  const temToken = !ehAdmin && !!tokenCliente();
+  const {
+    data: eu,
+    isLoading,
+    isError,
+  } = useQuery({
+    queryKey: ["eu"],
+    queryFn: buscarEu,
+    enabled: temToken,
+    retry: false,
+  });
+
+  if (ehAdmin) return <Outlet />;
+
+  if (!temToken || isError) return <AcessoRestrito />;
+
+  if (isLoading || !eu) {
+    return (
+      <div className="flex min-h-svh items-center justify-center">
+        <Loader2 className="text-muted-foreground size-6 animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="bg-background text-foreground min-h-svh">
@@ -71,6 +102,8 @@ export function RootLayout() {
       <main className="mx-auto max-w-7xl px-4 py-6">
         <Outlet />
       </main>
+
+      {!eu.nomePersonalizado && <NomeDialog />}
     </div>
   );
 }

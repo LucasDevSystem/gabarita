@@ -3,9 +3,13 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { paths } from "./config.js";
+import { registrarAuth } from "./middleware/auth.js";
+import { registrarRotasAdmin } from "./routes/admin.js";
+import { registrarRotaEu } from "./routes/eu.js";
 import { registrarRotasFiltros } from "./routes/filtros.js";
 import { registrarRotasQuestoes } from "./routes/questoes.js";
 import { registrarRotasEstatisticas } from "./routes/estatisticas.js";
+import { registrarRotaSaude } from "./routes/saude.js";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -22,6 +26,15 @@ async function main() {
     await app.register(cors, { origin: true });
   }
 
+  // Depois do CORS de propósito: o CORS tem seu próprio hook onRequest que
+  // responde o preflight OPTIONS (sem header Authorization) antes de chegar
+  // aqui. Se o gate de auth rodasse primeiro, o preflight seria barrado com
+  // 401 e o dev cruzado Vite/API quebraria.
+  registrarAuth(app);
+
+  registrarRotaSaude(app);
+  registrarRotaEu(app);
+  registrarRotasAdmin(app);
   registrarRotasFiltros(app);
   registrarRotasQuestoes(app);
   registrarRotasEstatisticas(app);

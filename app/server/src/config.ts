@@ -28,4 +28,10 @@ export const env = {
     region: process.env.AWS_REGION || "us-east-1",
     tablePrefix: process.env.DYNAMO_TABLE_PREFIX || "gabarita-",
   },
+  // Segredo único pro painel /admin (ver middleware/auth.ts) — mesmo padrão
+  // das credenciais AWS: só variável de ambiente, nunca commitado. String
+  // vazia de propósito quando ausente, não undefined — evita que uma
+  // requisição sem header Authorization "combine" com um ADMIN_TOKEN não
+  // configurado.
+  adminToken: process.env.ADMIN_TOKEN ?? "",
 };

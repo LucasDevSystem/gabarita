@@ -7,12 +7,15 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
+  UpdateCommand,
   type QueryCommandInput,
   type ScanCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { env } from "../config.js";
 import type {
   Capacidades,
+  Cliente,
+  ClienteComEstatisticas,
   Estatisticas,
   FiltrosBase,
   FiltrosQuery,
@@ -36,8 +39,13 @@ import type {
 // mas mais lento que SQL quando nenhuma disciplina é escolhida (Scan na
 // tabela inteira) — aceitável na escala pessoal deste app.
 export const TABELA_QUESTOES = `${env.aws.tablePrefix}questoes`;
+// PK clienteGuid, SK questaoId — respostas são escopadas por cliente (ver
+// middleware/auth.ts). Serve tanto a leitura/escrita pontual quanto "quantas
+// questões o cliente X respondeu" como Query na partição dele, sem Scan.
 export const TABELA_RESPOSTAS = `${env.aws.tablePrefix}respostas`;
 export const TABELA_LOOKUPS = `${env.aws.tablePrefix}lookups`;
+// PK guid, sem SK — identidade de quem acessa via link de convite.
+export const TABELA_CLIENTES = `${env.aws.tablePrefix}clientes`;
 // Índice original, com ProjectionType ALL. Nenhuma consulta usa mais — fica
 // aqui só pro script de limpeza saber o nome. Pode ser apagado depois que os
 // índices enxutos estiverem em produção.
@@ -118,6 +126,7 @@ interface ItemQuestaoDynamo {
 }
 
 interface ItemResposta {
+  clienteGuid: string;
   questaoId: number;
   itemId: number;
   correta: boolean;
@@ -337,9 +346,15 @@ export class RepositorioDynamo implements Repositorio {
 
   private cacheLookups = new Map<string, ItemLookup[]>();
   // Cursor de cada (filtro, perPage, página), pra servir a página seguinte sem
-  // repercorrer o que já foi lido.
+  // repercorrer o que já foi lido. RepositorioDynamo é uma instância única
+  // reaproveitada por todas as requisições do processo — a chave (assinatura,
+  // ver listarQuestoes) inclui o clienteGuid de propósito, senão o cursor
+  // cacheado do filtro "não resolvidas" de um cliente vazaria pro próximo
+  // cliente que pedir a mesma combinação de filtros.
   private cacheEstados = new Map<string, { expira: number; estado: EstadoPagina }>();
-  private cacheRespostas: { expira: number; itens: ItemResposta[] } | null = null;
+  // Por cliente — mesmo motivo acima. Um Map único e compartilhado misturaria
+  // as respostas de clientes diferentes.
+  private cacheRespostas = new Map<string, { expira: number; itens: ItemResposta[] }>();
   private cacheAssuntosPorDisciplina = new Map<
     string,
     { expira: number; contagens: Map<number, { nome: string; qtd: number }> }
@@ -663,7 +678,7 @@ export class RepositorioDynamo implements Repositorio {
     return itens;
   }
 
-  private async buscarRespostasEmLote(ids: number[]): Promise<Map<number, ItemResposta>> {
+  private async buscarRespostasEmLote(clienteGuid: string, ids: number[]): Promise<Map<number, ItemResposta>> {
     const mapa = new Map<number, ItemResposta>();
     const doc = getCliente();
     for (let i = 0; i < ids.length; i += 100) {
@@ -671,7 +686,9 @@ export class RepositorioDynamo implements Repositorio {
       if (!lote.length) continue;
       const res = await doc.send(
         new BatchGetCommand({
-          RequestItems: { [TABELA_RESPOSTAS]: { Keys: lote.map((id) => ({ questaoId: id })) } },
+          RequestItems: {
+            [TABELA_RESPOSTAS]: { Keys: lote.map((id) => ({ clienteGuid, questaoId: id })) },
+          },
         }),
       );
       for (const item of (res.Responses?.[TABELA_RESPOSTAS] as ItemResposta[]) ?? []) {
@@ -703,37 +720,44 @@ export class RepositorioDynamo implements Repositorio {
     };
   }
 
-  // Todas as respostas já dadas. A tabela é pequena por natureza (só o que o
-  // usuário respondeu), então cabe em memória e evita ida por questão.
-  private async carregarRespostas(): Promise<ItemResposta[]> {
-    if (this.cacheRespostas && this.cacheRespostas.expira > Date.now()) {
-      return this.cacheRespostas.itens;
-    }
-    const itens = await scanCompleto<ItemResposta>({ TableName: TABELA_RESPOSTAS });
-    this.cacheRespostas = { expira: Date.now() + this.TTL_CACHE_MS, itens };
+  // Todas as respostas já dadas por um cliente. A partição de um cliente é
+  // pequena por natureza (só o que ele mesmo respondeu), então cabe em
+  // memória e evita ida por questão. Query (não Scan) na partição do cliente
+  // — mais barato, e naturalmente escopado.
+  private async carregarRespostas(clienteGuid: string): Promise<ItemResposta[]> {
+    const cache = this.cacheRespostas.get(clienteGuid);
+    if (cache && cache.expira > Date.now()) return cache.itens;
+    const itens = await queryCompleto<ItemResposta>({
+      TableName: TABELA_RESPOSTAS,
+      KeyConditionExpression: "clienteGuid = :g",
+      ExpressionAttributeValues: { ":g": clienteGuid },
+    });
+    this.cacheRespostas.set(clienteGuid, { expira: Date.now() + this.TTL_CACHE_MS, itens });
     return itens;
   }
 
-  async listarQuestoes(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
+  async listarQuestoes(clienteGuid: string, f: FiltrosQuery): Promise<ListaQuestoesResultado> {
     // "resolvidas/certas/erradas" já têm o conjunto candidato pronto e pequeno
     // na tabela de respostas — percorrer o índice de questões pra depois
     // descartar quase tudo seria muito pior.
     if (f.minhasQuestoes && f.minhasQuestoes !== "naoresolvidas") {
-      return this.listarPorRespostas(f);
+      return this.listarPorRespostas(clienteGuid, f);
     }
 
     const ignorar =
       f.minhasQuestoes === "naoresolvidas"
-        ? new Set((await this.carregarRespostas()).map((r) => r.questaoId))
+        ? new Set((await this.carregarRespostas(clienteGuid)).map((r) => r.questaoId))
         : undefined;
 
-    const assinatura = JSON.stringify({ ...f, page: undefined, perPage: undefined });
+    // clienteGuid entra na assinatura de propósito — ver comentário em
+    // cacheEstados.
+    const assinatura = JSON.stringify({ clienteGuid, ...f, page: undefined, perPage: undefined });
     const estado = await this.estadoParaPagina(f, assinatura, ignorar);
     const ids = await this.avancar(f, estado, f.perPage, ignorar);
     const temMais = this.temMais(estado);
     this.guardarEstado(assinatura, f.perPage, f.page + 1, estado);
 
-    const rows = await this.montarLinhas(ids);
+    const rows = await this.montarLinhas(clienteGuid, ids);
 
     const preCalculado = await this.totalPreCalculado(f);
     return {
@@ -752,8 +776,8 @@ export class RepositorioDynamo implements Repositorio {
   // (pequena e já é o conjunto candidato) e aplica os demais filtros em
   // memória sobre os corpos — ver casaFiltros, que espelha
   // montarFilterExpression.
-  private async listarPorRespostas(f: FiltrosQuery): Promise<ListaQuestoesResultado> {
-    const respostas = await this.carregarRespostas();
+  private async listarPorRespostas(clienteGuid: string, f: FiltrosQuery): Promise<ListaQuestoesResultado> {
+    const respostas = await this.carregarRespostas(clienteGuid);
     const candidatas = respostas.filter((r) =>
       f.minhasQuestoes === "certas" ? r.correta : f.minhasQuestoes === "erradas" ? !r.correta : true,
     );
@@ -779,11 +803,11 @@ export class RepositorioDynamo implements Repositorio {
 
   // Só agora busca o corpo inteiro das questões — e só das ~20 a 100 desta
   // página, nunca do conjunto de candidatos inteiro.
-  private async montarLinhas(ids: number[]): Promise<Questao[]> {
+  private async montarLinhas(clienteGuid: string, ids: number[]): Promise<Questao[]> {
     if (!ids.length) return [];
     const [questoes, respostas] = await Promise.all([
       this.buscarQuestoesPorId(ids),
-      this.buscarRespostasEmLote(ids),
+      this.buscarRespostasEmLote(clienteGuid, ids),
     ]);
     const porId = new Map(questoes.map((q) => [q.id, q]));
     return ids
@@ -792,7 +816,7 @@ export class RepositorioDynamo implements Repositorio {
       .map((item) => this.converterQuestao(item, respostas.get(item.id)));
   }
 
-  async responder(questaoId: number, itemId: number): Promise<RespostaEnviada | null> {
+  async responder(clienteGuid: string, questaoId: number, itemId: number): Promise<RespostaEnviada | null> {
     const doc = getCliente();
     const res = await doc.send(new GetCommand({ TableName: TABELA_QUESTOES, Key: { id: questaoId } }));
     const questao = res.Item as ItemQuestaoDynamo | undefined;
@@ -804,6 +828,7 @@ export class RepositorioDynamo implements Repositorio {
       new PutCommand({
         TableName: TABELA_RESPOSTAS,
         Item: {
+          clienteGuid,
           questaoId,
           itemId,
           correta,
@@ -815,17 +840,19 @@ export class RepositorioDynamo implements Repositorio {
 
     // Sem isso o filtro "não resolvidas" continuaria mostrando esta questão
     // por até 60s (TTL do cache).
-    this.cacheRespostas = null;
+    this.cacheRespostas.delete(clienteGuid);
     return { correta, respostaCorretaId: questao.respostaItemId };
   }
 
-  async resetarResposta(questaoId: number): Promise<void> {
-    await getCliente().send(new DeleteCommand({ TableName: TABELA_RESPOSTAS, Key: { questaoId } }));
-    this.cacheRespostas = null;
+  async resetarResposta(clienteGuid: string, questaoId: number): Promise<void> {
+    await getCliente().send(
+      new DeleteCommand({ TableName: TABELA_RESPOSTAS, Key: { clienteGuid, questaoId } }),
+    );
+    this.cacheRespostas.delete(clienteGuid);
   }
 
-  async estatisticas(): Promise<Estatisticas> {
-    const todas = await this.carregarRespostas();
+  async estatisticas(clienteGuid: string): Promise<Estatisticas> {
+    const todas = await this.carregarRespostas(clienteGuid);
     const respondidas = todas.length;
     const certas = todas.filter((r) => r.correta).length;
     const erradas = respondidas - certas;
@@ -856,5 +883,60 @@ export class RepositorioDynamo implements Repositorio {
       percentualAcerto: respondidas > 0 ? (certas / respondidas) * 100 : 0,
       porDisciplina,
     };
+  }
+
+  // Contagem enxuta (sem porDisciplina) — usada na listagem do /admin, onde
+  // calcular o detalhamento por disciplina de cada cliente seria trabalho
+  // que a tela nem exibe.
+  private async contarRespostas(guid: string): Promise<{ respondidas: number; certas: number; erradas: number }> {
+    const itens = await this.carregarRespostas(guid);
+    const certas = itens.filter((r) => r.correta).length;
+    return { respondidas: itens.length, certas, erradas: itens.length - certas };
+  }
+
+  async criarCliente(nome?: string): Promise<Cliente> {
+    const cliente: Cliente = {
+      guid: crypto.randomUUID(),
+      nome: nome?.trim() || "Cliente novo",
+      nomePersonalizado: null,
+      criadoEm: new Date().toISOString(),
+      ultimoAcesso: null,
+    };
+    await getCliente().send(new PutCommand({ TableName: TABELA_CLIENTES, Item: cliente }));
+    return cliente;
+  }
+
+  async listarClientes(): Promise<ClienteComEstatisticas[]> {
+    const clientes = await scanCompleto<Cliente>({ TableName: TABELA_CLIENTES });
+    return Promise.all(
+      clientes.map(async (c) => ({ ...c, ...(await this.contarRespostas(c.guid)) })),
+    );
+  }
+
+  async buscarCliente(guid: string): Promise<Cliente | null> {
+    const res = await getCliente().send(new GetCommand({ TableName: TABELA_CLIENTES, Key: { guid } }));
+    return (res.Item as Cliente | undefined) ?? null;
+  }
+
+  async atualizarNomePersonalizado(guid: string, nome: string): Promise<void> {
+    await getCliente().send(
+      new UpdateCommand({
+        TableName: TABELA_CLIENTES,
+        Key: { guid },
+        UpdateExpression: "SET nomePersonalizado = :n",
+        ExpressionAttributeValues: { ":n": nome.trim() },
+      }),
+    );
+  }
+
+  async registrarAcesso(guid: string): Promise<void> {
+    await getCliente().send(
+      new UpdateCommand({
+        TableName: TABELA_CLIENTES,
+        Key: { guid },
+        UpdateExpression: "SET ultimoAcesso = :u",
+        ExpressionAttributeValues: { ":u": new Date().toISOString() },
+      }),
+    );
   }
 }

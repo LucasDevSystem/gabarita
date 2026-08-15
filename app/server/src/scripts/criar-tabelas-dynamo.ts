@@ -13,6 +13,7 @@ import {
   ATRIBUTOS_PROJETADOS,
   INDICE_BUSCA,
   INDICE_GLOBAL,
+  TABELA_CLIENTES,
   TABELA_LOOKUPS,
   TABELA_QUESTOES,
   TABELA_RESPOSTAS,
@@ -80,13 +81,35 @@ async function main() {
     ),
   );
 
+  // PK clienteGuid, SK questaoId — respostas escopadas por cliente. Chave de
+  // tabela é imutável: se você já tinha gabarita-respostas de antes dessa
+  // mudança (PK só questaoId, sem cliente), apague a tabela na AWS antes de
+  // rodar este script de novo, senão criarSeNaoExiste só vê que ela já existe
+  // e pula, deixando o schema velho no lugar.
   await criarSeNaoExiste(TABELA_RESPOSTAS, () =>
     client.send(
       new CreateTableCommand({
         TableName: TABELA_RESPOSTAS,
         BillingMode: "PAY_PER_REQUEST",
-        AttributeDefinitions: [{ AttributeName: "questaoId", AttributeType: "N" }],
-        KeySchema: [{ AttributeName: "questaoId", KeyType: "HASH" }],
+        AttributeDefinitions: [
+          { AttributeName: "clienteGuid", AttributeType: "S" },
+          { AttributeName: "questaoId", AttributeType: "N" },
+        ],
+        KeySchema: [
+          { AttributeName: "clienteGuid", KeyType: "HASH" },
+          { AttributeName: "questaoId", KeyType: "RANGE" },
+        ],
+      }),
+    ),
+  );
+
+  await criarSeNaoExiste(TABELA_CLIENTES, () =>
+    client.send(
+      new CreateTableCommand({
+        TableName: TABELA_CLIENTES,
+        BillingMode: "PAY_PER_REQUEST",
+        AttributeDefinitions: [{ AttributeName: "guid", AttributeType: "S" }],
+        KeySchema: [{ AttributeName: "guid", KeyType: "HASH" }],
       }),
     ),
   );

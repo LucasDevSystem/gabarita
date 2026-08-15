@@ -16,7 +16,10 @@ services:
     rootDir: app
     buildCommand: npm install -g pnpm@11 && pnpm install --frozen-lockfile && pnpm build
     startCommand: pnpm start
-    healthCheckPath: /api/filtros
+    # /api/filtros agora exige um guid de cliente (acesso por convite — ver
+    # middleware/auth.ts), então o Render bateria nele sem Authorization e
+    # trataria o serviço como não-saudável. /api/saude é público de propósito.
+    healthCheckPath: /api/saude
     envVars:
       - key: NODE_ENV
         value: production
@@ -29,4 +32,6 @@ services:
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: ADMIN_TOKEN
         sync: false

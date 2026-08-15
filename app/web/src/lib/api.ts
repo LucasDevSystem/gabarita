@@ -1,4 +1,7 @@
+import { tokenAdmin, tokenCliente } from "./auth";
 import type {
+  Cliente,
+  ClienteComEstatisticas,
   Estatisticas,
   FiltrosBase,
   FiltrosState,
@@ -7,14 +10,46 @@ import type {
   RespostaEnviada,
 } from "./types";
 
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+// Toda chamada à API passa por aqui pra anexar o token de acesso — client ou
+// admin, conforme a chamada. Sem token nenhuma requisição autenticada
+// funciona (ver middleware/auth.ts no servidor).
+async function chamar<T>(url: string, opts: RequestInit, token: string | null): Promise<T> {
+  const headers = new Headers(opts.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(url, { ...opts, headers });
   if (!res.ok) throw new Error(`Falha na requisição: ${res.status} ${url}`);
   return res.json() as Promise<T>;
 }
 
+const apiFetch = <T>(url: string, opts: RequestInit = {}) => chamar<T>(url, opts, tokenCliente());
+const adminFetch = <T>(url: string, opts: RequestInit = {}) => chamar<T>(url, opts, tokenAdmin());
+
+export function buscarEu(): Promise<Cliente> {
+  return apiFetch("/api/eu");
+}
+
+export function atualizarMeuNome(nome: string): Promise<Cliente> {
+  return apiFetch("/api/eu", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nome }),
+  });
+}
+
+export function listarClientesAdmin(): Promise<ClienteComEstatisticas[]> {
+  return adminFetch("/api/admin/clientes");
+}
+
+export function criarClienteAdmin(nome?: string): Promise<Cliente> {
+  return adminFetch("/api/admin/clientes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nome }),
+  });
+}
+
 export function buscarFiltrosBase(): Promise<FiltrosBase> {
-  return getJson("/api/filtros");
+  return apiFetch("/api/filtros");
 }
 
 const LOOKUPS = ["bancas", "orgaos", "cargos", "assuntos"] as const;
@@ -28,7 +63,7 @@ export function buscarLookup(
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (disciplina.length) params.set("disciplina", disciplina.join(","));
-  return getJson(`/api/filtros/${tipo}?${params.toString()}`);
+  return apiFetch(`/api/filtros/${tipo}?${params.toString()}`);
 }
 
 function paramsDeFiltros(f: FiltrosState): URLSearchParams {
@@ -61,24 +96,21 @@ function paramsDeFiltros(f: FiltrosState): URLSearchParams {
 }
 
 export function buscarQuestoes(f: FiltrosState): Promise<ListaQuestoesResponse> {
-  return getJson(`/api/questoes?${paramsDeFiltros(f).toString()}`);
+  return apiFetch(`/api/questoes?${paramsDeFiltros(f).toString()}`);
 }
 
-export async function responderQuestao(id: number, itemId: number): Promise<RespostaEnviada> {
-  const res = await fetch(`/api/questoes/${id}/responder`, {
+export function responderQuestao(id: number, itemId: number): Promise<RespostaEnviada> {
+  return apiFetch(`/api/questoes/${id}/responder`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ itemId }),
   });
-  if (!res.ok) throw new Error("Falha ao enviar resposta");
-  return res.json();
 }
 
-export async function resetarResposta(id: number): Promise<void> {
-  const res = await fetch(`/api/questoes/${id}/responder`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Falha ao resetar resposta");
+export function resetarResposta(id: number): Promise<void> {
+  return apiFetch(`/api/questoes/${id}/responder`, { method: "DELETE" });
 }
 
 export function buscarEstatisticas(): Promise<Estatisticas> {
-  return getJson("/api/estatisticas");
+  return apiFetch("/api/estatisticas");
 }
