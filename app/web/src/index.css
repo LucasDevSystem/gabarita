@@ -50,7 +50,7 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* Gabarita — identidade visual: índigo/violeta como cor de marca, âmbar para
+/* Gabarita — identidade visual: índigo/violeta como cor de marca, verde para
    acerto/sequência, o destructive padrão (coral) para erro. Escuro é o tema
    padrão do app (definido no ThemeProvider); claro fica disponível no toggle. */
 :root {
@@ -72,8 +72,8 @@
     --border: oklch(0.9 0.012 282);
     --input: oklch(0.9 0.012 282);
     --ring: oklch(0.6 0.15 288);
-    --correct: oklch(0.72 0.15 78);
-    --correct-foreground: oklch(0.22 0.05 78);
+    --correct: oklch(0.72 0.17 145);
+    --correct-foreground: oklch(0.22 0.06 145);
     --chart-1: oklch(0.47 0.19 288);
     --chart-2: oklch(0.65 0.18 300);
     --chart-3: oklch(0.72 0.15 78);
@@ -109,8 +109,8 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.62 0.15 288);
-    --correct: oklch(0.8 0.14 82);
-    --correct-foreground: oklch(0.2 0.04 82);
+    --correct: oklch(0.78 0.17 145);
+    --correct-foreground: oklch(0.2 0.05 145);
     --chart-1: oklch(0.73 0.15 288);
     --chart-2: oklch(0.75 0.14 305);
     --chart-3: oklch(0.8 0.14 82);

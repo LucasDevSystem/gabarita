@@ -13,11 +13,14 @@ import type {
   RespostaEnviada,
 } from "./types.js";
 
-const LOOKUP_TABELAS: Record<LookupTipo, { tabela: string; coluna: string }> = {
-  bancas: { tabela: "bancas", coluna: "nome" },
-  orgaos: { tabela: "orgaos", coluna: "nome" },
-  cargos: { tabela: "cargos", coluna: "descricao" },
-  assuntos: { tabela: "assuntos", coluna: "nome" },
+// comSigla: banca e órgão têm sigla própria (ex.: "CESPE", "TJSP") — busca
+// passa a casar também contra ela, e o rótulo exibido prefere a sigla ao
+// nome completo quando ela existe. Cargo/assunto não têm essa coluna.
+const LOOKUP_TABELAS: Record<LookupTipo, { tabela: string; coluna: string; comSigla: boolean }> = {
+  bancas: { tabela: "bancas", coluna: "nome", comSigla: true },
+  orgaos: { tabela: "orgaos", coluna: "nome", comSigla: true },
+  cargos: { tabela: "cargos", coluna: "descricao", comSigla: false },
+  assuntos: { tabela: "assuntos", coluna: "nome", comSigla: false },
 };
 
 function ftsQueryDe(texto: string): string {
@@ -201,15 +204,19 @@ export class RepositorioSqlite implements Repositorio {
       return db.prepare(sql).all(...params) as unknown as OpcaoFiltro[];
     }
 
-    const { tabela, coluna } = LOOKUP_TABELAS[tipo];
+    const { tabela, coluna, comSigla } = LOOKUP_TABELAS[tipo];
+    // sigla vazia ("") não deve "vencer" o nome — NULLIF trata isso como nulo
+    // pra cair no fallback do COALESCE.
+    const rotulo = comSigla ? `COALESCE(NULLIF(sigla, ''), ${coluna})` : coluna;
+    const onde = comSigla ? `(sigla LIKE ? OR ${coluna} LIKE ?)` : `${coluna} LIKE ?`;
     const sql = q
-      ? `SELECT id, ${coluna} AS nome, qtd_questoes AS qtdQuestoes FROM ${tabela}
-         WHERE ${coluna} LIKE ? AND qtd_questoes > 0
+      ? `SELECT id, ${rotulo} AS nome, qtd_questoes AS qtdQuestoes FROM ${tabela}
+         WHERE ${onde} AND qtd_questoes > 0
          ORDER BY qtd_questoes DESC LIMIT ?`
-      : `SELECT id, ${coluna} AS nome, qtd_questoes AS qtdQuestoes FROM ${tabela}
+      : `SELECT id, ${rotulo} AS nome, qtd_questoes AS qtdQuestoes FROM ${tabela}
          WHERE qtd_questoes > 0
          ORDER BY qtd_questoes DESC LIMIT ?`;
-    const params = q ? [`%${q}%`, limit] : [limit];
+    const params = q ? (comSigla ? [`%${q}%`, `%${q}%`, limit] : [`%${q}%`, limit]) : [limit];
     return db.prepare(sql).all(...params) as unknown as OpcaoFiltro[];
   }
 

@@ -96,6 +96,9 @@ interface ItemLookup {
   id: number;
   nome: string;
   slug?: string;
+  // Só banca e órgão têm (gravada pelo sync — ver sincronizar-dynamo.ts).
+  // Busca casa contra ela também, e o rótulo exibido prefere sigla ao nome.
+  sigla?: string;
   qtdQuestoes: number;
 }
 
@@ -491,10 +494,16 @@ export class RepositorioDynamo implements Repositorio {
 
     const lista = await this.lookups(LOOKUP_TIPO[tipo]);
     return lista
-      .filter((i) => i.qtdQuestoes > 0 && (!termo || i.nome.toLowerCase().includes(termo)))
+      .filter(
+        (i) =>
+          i.qtdQuestoes > 0 &&
+          (!termo || i.nome.toLowerCase().includes(termo) || (i.sigla ?? "").toLowerCase().includes(termo)),
+      )
       .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)
       .slice(0, limit)
-      .map((i) => ({ id: i.id, nome: i.nome, qtdQuestoes: i.qtdQuestoes }));
+      // Só banca e órgão têm sigla — quando existe, prefere ela ao nome
+      // completo pro rótulo exibido (ex.: "CESPE" em vez do nome por extenso).
+      .map((i) => ({ id: i.id, nome: i.sigla?.trim() || i.nome, qtdQuestoes: i.qtdQuestoes }));
   }
 
   // Avança o estado de paginação em `quantidade` ids, na ordem global de id
