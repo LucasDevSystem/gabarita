@@ -66,6 +66,18 @@ export function buscarLookup(
   return apiFetch(`/api/filtros/${tipo}?${params.toString()}`);
 }
 
+// Diferente de buscarLookup: traz a árvore inteira da disciplina de uma vez
+// (sem termo de busca, teto bem mais alto no servidor — ver
+// routes/filtros.ts) em vez de uma lista por relevância. A árvore é buscada
+// e ordenada/filtrada por texto do lado do cliente — precisa de todo mundo
+// de uma vez pra reconstruir a estrutura pai/filho corretamente.
+export function buscarArvoreAssuntos(disciplina: number[]): Promise<OpcaoFiltro[]> {
+  const params = new URLSearchParams();
+  if (disciplina.length) params.set("disciplina", disciplina.join(","));
+  params.set("limit", "2000");
+  return apiFetch(`/api/filtros/assuntos?${params.toString()}`);
+}
+
 function paramsDeFiltros(f: FiltrosState): URLSearchParams {
   const p = new URLSearchParams();
   if (f.q) p.set("q", f.q);

@@ -4,6 +4,9 @@ export interface OpcaoFiltro {
   id: number;
   nome: string;
   qtdQuestoes: number;
+  // Só populado pro tipo "assuntos" (árvore) — undefined pros demais
+  // (banca/órgão/cargo), que continuam sendo listas planas.
+  pai?: number | null;
 }
 
 export interface FiltrosBase {

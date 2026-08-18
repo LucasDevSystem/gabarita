@@ -31,6 +31,7 @@ import {
 } from "../repo/dynamo.js";
 import { slugParaNome } from "./slug-nome.js";
 import { recomputarContagens } from "./recontar-lookups-dynamo.js";
+import { carregarArvore, calcularFecho } from "./assunto-arvore.js";
 
 const { parser } = streamJsonPkg;
 const { streamArray } = StreamArrayPkg;
@@ -122,30 +123,38 @@ async function escreverEmLotes(tabela: string, itens: Record<string, unknown>[])
   if (erro) throw erro;
 }
 
-// ids de disciplina precisam bater com o que já existe no DynamoDB (foram
-// atribuídos originalmente pelo ingest local em SQLite) — reaproveita o
-// mesmo esquema pra disciplinas já conhecidas, e atribui o próximo id livre
-// pras que não tinham nenhuma questão sobrevivendo na amostra de 10%.
+// ids de disciplina precisam bater com o que já existe no DynamoDB.
 //
-// ids novos (sem correspondência no SQLite local) não persistem de volta pro
-// SQLite — só existem em sync-status.json e no DynamoDB. Por isso o cálculo
-// do próximo id livre e o mapeamento slug->id precisam considerar também o
-// status salvo, senão uma execução seguinte pode reatribuir um id já usado
-// (ex.: disciplina nova cujo arquivo deu erro e será reprocessado).
+// sync-status.json é a fonte AUTORITATIVA — reflete o que já está gravado em
+// produção — e entra primeiro. O SQLite local só serve de fallback pra slugs
+// que o status ainda não conhece (disciplina nunca sincronizada por este
+// script). Isso é proposital e já causou corrupção uma vez quando invertido:
+// o SQLite local pode ser reconstruído a qualquer momento (reingestão
+// parcial, amostra diferente, teste local) e nesse caso os ids que ele
+// atribui não têm relação nenhuma com o que já foi gravado em produção — se
+// o SQLite tivesse prioridade, uma reingestão local podia fazer esta função
+// devolver um id diferente pra uma disciplina JÁ sincronizada, e o próximo
+// SYNC_FORCAR=1 reescreveria as questões dela sob o id errado, colidindo com
+// qualquer disciplina que já tivesse esse id em produção.
 function mapaDisciplinas(statusAtual: Status) {
+  const porSlug = new Map<string, { id: number; nome: string }>();
+  let maiorId = 0;
+
+  for (const [arquivo, info] of Object.entries(statusAtual)) {
+    const slug = arquivo.replace(/\.json$/, "");
+    porSlug.set(slug, { id: info.disciplinaId, nome: info.disciplinaNome });
+    maiorId = Math.max(maiorId, info.disciplinaId);
+  }
+
   const db = getDb();
   const linhas = db.prepare("SELECT id, slug, nome FROM disciplinas").all() as {
     id: number;
     slug: string;
     nome: string;
   }[];
-  const porSlug = new Map(linhas.map((l) => [l.slug, { id: l.id, nome: l.nome }]));
-  let maiorId = linhas.reduce((max, l) => Math.max(max, l.id), 0);
-
-  for (const [arquivo, info] of Object.entries(statusAtual)) {
-    const slug = arquivo.replace(/\.json$/, "");
-    if (!porSlug.has(slug)) porSlug.set(slug, { id: info.disciplinaId, nome: info.disciplinaNome });
-    maiorId = Math.max(maiorId, info.disciplinaId);
+  for (const l of linhas) {
+    if (!porSlug.has(l.slug)) porSlug.set(l.slug, { id: l.id, nome: l.nome });
+    maiorId = Math.max(maiorId, l.id);
   }
 
   return { porSlug, proximoId: maiorId + 1 };
@@ -163,7 +172,10 @@ function idsValidos(arr: AnyRec[] | undefined): number[] {
   return (arr ?? []).map((x) => x?.id).filter(idValido);
 }
 
-function converterQuestao(q: AnyRec, disciplinaId: number, disciplinaNome: string) {
+// assuntoIds recebido já pronto (fecho calculado uma vez no chamador, e
+// reaproveitado também pra contagemAssuntos — ver sincronizarArquivo) em vez
+// de recalculado aqui, pra não repetir o cálculo por questão.
+function converterQuestao(q: AnyRec, disciplinaId: number, disciplinaNome: string, assuntoIds: number[]) {
   return {
     id: q.id,
     // partição sintética do global-index, que atende a tela inicial (sem
@@ -195,7 +207,7 @@ function converterQuestao(q: AnyRec, disciplinaId: number, disciplinaNome: strin
     cargoIds: idsValidos(q.cargos),
     carreiraIds: idsValidos(q.carreiras),
     areaIds: idsValidos(q.areas),
-    assuntoIds: idsValidos(q.assuntos),
+    assuntoIds,
     anos: q.anos ?? [],
     timestamp: q.timestamp ?? null,
   };
@@ -249,8 +261,11 @@ async function sincronizarArquivo(
   const lookups = new Map<string, RegistroLookup>();
   // quantas questões DESTA disciplina cada assunto tem — evita que o seletor
   // de Assunto precise percorrer a partição inteira da disciplina só pra
-  // contar (era o mesmo O(N) que derrubava a listagem).
+  // contar (era o mesmo O(N) que derrubava a listagem). Já é a contagem
+  // "enrolada" (nó pai soma os descendentes), porque a chave usada é o fecho
+  // de cada questão, não só os ids marcados diretamente — ver calcularFecho.
   const contagemAssuntos = new Map<number, number>();
+  const arvoreAssuntos = carregarArvore();
   let loteAtual: Record<string, unknown>[] = [];
 
   async function despachar(lote: Record<string, unknown>[]) {
@@ -271,9 +286,16 @@ async function sincronizarArquivo(
     if (erro) break;
     if (!idsVistos.has(value.id)) {
       idsVistos.add(value.id);
-      loteAtual.push(converterQuestao(value, disciplinaId, disciplinaNome));
+      // Sobe até a raiz a partir de cada id marcado — assim "selecionar um nó
+      // pai" no filtro casa com toda questão marcada num descendente dele,
+      // sem precisar expandir o filtro pra baixo (que estouraria o limite de
+      // ~4KB do FilterExpression pra nós com centenas de descendentes — ver
+      // assunto-arvore.ts). Calculado uma vez, usado tanto no item gravado
+      // quanto na contagem por disciplina.
+      const fecho = calcularFecho(idsValidos(value.assuntos), arvoreAssuntos);
+      loteAtual.push(converterQuestao(value, disciplinaId, disciplinaNome, fecho));
       coletarLookups(value, lookups);
-      for (const assuntoId of idsValidos(value.assuntos)) {
+      for (const assuntoId of fecho) {
         contagemAssuntos.set(assuntoId, (contagemAssuntos.get(assuntoId) ?? 0) + 1);
       }
     }
@@ -294,6 +316,7 @@ async function sincronizarArquivo(
 }
 
 async function main() {
+  const arvoreAssuntos = carregarArvore();
   const prefixo = process.env.SYNC_PREFIXO ?? "direito";
   const arquivosExplicitos = process.env.SYNC_ARQUIVOS?.split(",").map((s) => s.trim());
   const limite = process.env.SYNC_LIMITE ? Number(process.env.SYNC_LIMITE) : Infinity;
@@ -360,9 +383,11 @@ async function main() {
       // grava tudo (disciplina + referências coletadas nesse arquivo) ANTES
       // de marcar "concluido" — só assim "concluido" garante que nada ficou
       // pra trás, já que esse arquivo nunca mais será reprocessado.
-      const nomesAssuntos = new Map(
-        [...lookups.values()].filter((l) => l.tipo === "assunto").map((l) => [l.id, l.nome]),
-      );
+      //
+      // nome/pai vêm do módulo da árvore (cobertura completa dos 33k+208
+      // nós), não das tags cruas vistas durante o streaming — um ancestral
+      // que nunca é marcado diretamente em nenhuma questão do arquivo (só
+      // entra via calcularFecho) nunca apareceria no coletor de lookups.
       const registrosLookup = [
         { tipo: "disciplina", id: info.id, nome: info.nome, slug, qtdQuestoes: questoesUnicas },
         ...lookups.values(),
@@ -371,7 +396,8 @@ async function main() {
         ...[...contagemAssuntos.entries()].map(([assuntoId, qtd]) => ({
           tipo: `${PREFIXO_ASSUNTO_DISCIPLINA}${info!.id}`,
           id: assuntoId,
-          nome: nomesAssuntos.get(assuntoId) ?? `Assunto ${assuntoId}`,
+          nome: arvoreAssuntos.get(assuntoId)?.nome ?? `Assunto ${assuntoId}`,
+          pai: arvoreAssuntos.get(assuntoId)?.pai ?? null,
           qtdQuestoes: qtd,
         })),
       ] as unknown as Record<string, unknown>[];

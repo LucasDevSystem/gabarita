@@ -13,6 +13,7 @@ export const paths = {
   carreirasJson: path.join(projectRoot, "carreiras.json"),
   areasFormacaoJson: path.join(projectRoot, "areasformacao.json"),
   assuntosJson: path.join(projectRoot, "assuntos.json"),
+  arvoreAssuntosJson: path.join(projectRoot, "arvore_assuntos.json"),
   dbFile: path.join(serverRoot, "data", "app.db"),
   webDist: path.resolve(projectRoot, "app", "web", "dist"),
 };

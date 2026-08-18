@@ -9,6 +9,7 @@ import StreamArrayPkg from "stream-json/streamers/StreamArray.js";
 import { paths } from "../config.js";
 import { getDb } from "../db/index.js";
 import { slugParaNome } from "./slug-nome.js";
+import { carregarArvore, calcularFecho } from "./assunto-arvore.js";
 
 const { parser } = streamJsonPkg;
 const { streamArray } = StreamArrayPkg;
@@ -57,11 +58,17 @@ function seedLookupTables(db: DatabaseSync) {
     insArea.run(a.id, a.descricao);
   }
 
+  // Semeia a árvore inteira (raízes + nós profundos) de uma vez, com OR
+  // REPLACE — diferente das outras tabelas de referência acima, aqui
+  // queremos que arvore_assuntos.json seja a fonte autoritativa de `pai`,
+  // não "o que a primeira questão a referenciar esse id trouxe". Sem isso,
+  // `pai` fica não-confiável: sempre NULL pras 208 raízes (INSERT OR IGNORE
+  // nunca sobrescreve) e "primeiro que escrever ganha" pros nós profundos.
   const insAssunto = db.prepare(
-    "INSERT OR IGNORE INTO assuntos (id, nome, materia, pai) VALUES (?, ?, ?, ?)",
+    "INSERT OR REPLACE INTO assuntos (id, nome, materia, pai) VALUES (?, ?, ?, ?)",
   );
-  for (const a of readJson(paths.assuntosJson) as AnyRec[]) {
-    insAssunto.run(a.id, a.nome, 0, null);
+  for (const [id, no] of carregarArvore()) {
+    insAssunto.run(id, no.nome, bool(no.materia), no.pai);
   }
 }
 
@@ -181,9 +188,23 @@ function ingestQuestao(st: Statements, disciplinaId: number, q: AnyRec) {
     st.upsertArea.run(a.id, a.descricao);
     st.insQuestaoArea.run(q.id, a.id);
   }
+  // Fallback defensivo — normalmente redundante, já que seedLookupTables
+  // semeia a árvore inteira antes de qualquer questão ser processada; só
+  // entra em jogo se uma questão referenciar um id que não existe em
+  // arvore_assuntos.json/assuntos.json (não observado, mas não custa nada
+  // ter a rede de segurança).
   for (const a of q.assuntos ?? []) {
     st.upsertAssunto.run(a.id, a.nome, bool(a.materia), orNull(a.pai));
-    st.insQuestaoAssunto.run(q.id, a.id);
+  }
+  // Grava uma linha de junção por id marcado E por todo ancestral até a
+  // raiz — assim "selecionar um nó pai" no filtro já casa com toda questão
+  // marcada num descendente dele, sem precisar expandir o filtro (que
+  // estouraria pra nós com centenas de descendentes — ver assunto-arvore.ts).
+  const idsBase = (q.assuntos ?? [])
+    .map((a: AnyRec) => a.id)
+    .filter((id: unknown): id is number => typeof id === "number");
+  for (const id of calcularFecho(idsBase, carregarArvore())) {
+    st.insQuestaoAssunto.run(q.id, id);
   }
   for (const ano of q.anos ?? []) {
     st.insQuestaoAno.run(q.id, ano);

@@ -189,14 +189,18 @@ export class RepositorioSqlite implements Repositorio {
     if (tipo === "assuntos") {
       if (!disciplinaIds?.length) return [];
       const placeholders = disciplinaIds.map(() => "?").join(",");
+      // a.pai deixa o frontend reconstruir a árvore a partir da lista plana.
+      // A contagem em si não muda: questao_assuntos já tem uma linha por
+      // ancestral (gravada pelo ingest.ts via calcularFecho), então um nó
+      // pai já sai "enrolado" (soma de si + descendentes) de graça.
       const sql = `
-        SELECT a.id, a.nome, COUNT(DISTINCT qa.questao_id) AS qtdQuestoes
+        SELECT a.id, a.nome, a.pai, COUNT(DISTINCT qa.questao_id) AS qtdQuestoes
         FROM assuntos a
         JOIN questao_assuntos qa ON qa.assunto_id = a.id
         JOIN questoes qu ON qu.id = qa.questao_id
         WHERE qu.disciplina_id IN (${placeholders})
         ${q ? "AND a.nome LIKE ?" : ""}
-        GROUP BY a.id, a.nome
+        GROUP BY a.id, a.nome, a.pai
         ORDER BY qtdQuestoes DESC
         LIMIT ?
       `;

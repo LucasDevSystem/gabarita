@@ -2,6 +2,8 @@ export interface OpcaoFiltro {
   id: number;
   nome: string;
   qtdQuestoes: number;
+  // Só populado pro tipo "assuntos" (árvore) — undefined pros demais.
+  pai?: number | null;
 }
 
 export interface OpcaoContagem<T = string> {

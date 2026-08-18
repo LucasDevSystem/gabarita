@@ -99,6 +99,9 @@ interface ItemLookup {
   // Só banca e órgão têm (gravada pelo sync — ver sincronizar-dynamo.ts).
   // Busca casa contra ela também, e o rótulo exibido prefere sigla ao nome.
   sigla?: string;
+  // Só assunto tem — id do nó pai na árvore (null pra raiz). Usado pelo
+  // frontend pra reconstruir a árvore a partir da lista plana devolvida.
+  pai?: number | null;
   qtdQuestoes: number;
 }
 
@@ -360,17 +363,20 @@ export class RepositorioDynamo implements Repositorio {
   private cacheRespostas = new Map<string, { expira: number; itens: ItemResposta[] }>();
   private cacheAssuntosPorDisciplina = new Map<
     string,
-    { expira: number; contagens: Map<number, { nome: string; qtd: number }> }
+    { expira: number; contagens: Map<number, { nome: string; pai: number | null; qtd: number }> }
   >();
   private readonly TTL_CACHE_MS = 60_000;
 
-  // Assuntos de uma disciplina, com quantas questões cada um tem ali dentro.
-  // O caminho rápido lê a contagem que o sync já deixou pronta numa partição
-  // pequena; sem ela, percorre a partição da disciplina e conta (era o único
-  // caminho antes, e custava os mesmos ~30s da listagem).
+  // Assuntos de uma disciplina, com quantas questões cada um tem ali dentro
+  // — já "enrolado" (nó pai soma os descendentes), porque assuntoIds em cada
+  // questão já é o fecho até a raiz (ver sincronizar-dynamo.ts/assunto-arvore.ts),
+  // não só os ids marcados diretamente. O caminho rápido lê a contagem que o
+  // sync já deixou pronta numa partição pequena; sem ela, percorre a
+  // partição da disciplina e conta (era o único caminho antes, e custava os
+  // mesmos ~30s da listagem).
   private async contarAssuntosPorDisciplina(
     disciplinaIds: number[],
-  ): Promise<Map<number, { nome: string; qtd: number }>> {
+  ): Promise<Map<number, { nome: string; pai: number | null; qtd: number }>> {
     const chave = [...disciplinaIds].sort((a, b) => a - b).join(",");
     const cache = this.cacheAssuntosPorDisciplina.get(chave);
     if (cache && cache.expira > Date.now()) return cache.contagens;
@@ -384,9 +390,13 @@ export class RepositorioDynamo implements Repositorio {
           KeyConditionExpression: "tipo = :t",
           ExpressionAttributeValues: { ":t": `${PREFIXO_ASSUNTO_DISCIPLINA}${disciplinaId}` },
         });
-        // O registro pré-calculado já traz o nome, então nem precisa carregar
-        // a lista inteira de assuntos pra montar o seletor.
-        if (prontas.length) return prontas.map((l) => [l.id, { nome: l.nome, qtd: l.qtdQuestoes }] as const);
+        // O registro pré-calculado já traz nome e pai, então nem precisa
+        // carregar o catálogo inteiro pra montar a árvore.
+        if (prontas.length) {
+          return prontas.map(
+            (l) => [l.id, { nome: l.nome, pai: l.pai ?? null, qtd: l.qtdQuestoes }] as const,
+          );
+        }
 
         // Disciplina ainda não re-sincronizada (as que só têm a amostra de
         // 10%): percorre a partição inteira pra contar. Lento, mas correto —
@@ -406,20 +416,23 @@ export class RepositorioDynamo implements Repositorio {
             parcial.set(assuntoId, (parcial.get(assuntoId) ?? 0) + 1);
           }
         }
-        // Sem contagem pronta não há nome junto: aí sim busca a lista de
-        // assuntos (caminho lento, só pras disciplinas ainda não migradas).
-        const nomes = new Map((await this.lookups("assunto")).map((i) => [i.id, i.nome]));
-        return [...parcial.entries()].map(
-          ([id, qtd]) => [id, { nome: nomes.get(id) ?? `Assunto ${id}`, qtd }] as const,
-        );
+        // Sem contagem pronta não há nome/pai junto: busca no catálogo
+        // global da árvore (cobertura completa — ver
+        // carregar-arvore-assuntos-dynamo.ts), caminho lento só pras
+        // disciplinas ainda não migradas.
+        const arvore = new Map((await this.lookups("assunto-no")).map((i) => [i.id, i]));
+        return [...parcial.entries()].map(([id, qtd]) => {
+          const no = arvore.get(id);
+          return [id, { nome: no?.nome ?? `Assunto ${id}`, pai: no?.pai ?? null, qtd }] as const;
+        });
       }),
     );
 
-    const contagens = new Map<number, { nome: string; qtd: number }>();
+    const contagens = new Map<number, { nome: string; pai: number | null; qtd: number }>();
     for (const lista of porDisciplina) {
       for (const [assuntoId, info] of lista) {
         const atual = contagens.get(assuntoId);
-        contagens.set(assuntoId, { nome: info.nome, qtd: (atual?.qtd ?? 0) + info.qtd });
+        contagens.set(assuntoId, { nome: info.nome, pai: info.pai, qtd: (atual?.qtd ?? 0) + info.qtd });
       }
     }
 
@@ -484,9 +497,15 @@ export class RepositorioDynamo implements Repositorio {
 
     if (tipo === "assuntos") {
       if (!disciplinaIds?.length) return [];
+      // O frontend busca a árvore inteira da disciplina de uma vez (sem
+      // `termo`, limite alto — ver routes/filtros.ts) e filtra por texto do
+      // lado do cliente, onde dá pra manter a cadeia de ancestrais de um nó
+      // que bate mesmo se o nome dele não bater. Se algum chamador passar
+      // `termo` mesmo assim, o filtro abaixo é só por nome — pode devolver um
+      // nó sem o pai dele (que não bateu), então não serve pra montar árvore.
       const contagens = await this.contarAssuntosPorDisciplina(disciplinaIds);
       return [...contagens.entries()]
-        .map(([id, { nome, qtd }]) => ({ id, nome, qtdQuestoes: qtd }))
+        .map(([id, { nome, pai, qtd }]) => ({ id, nome, pai, qtdQuestoes: qtd }))
         .filter((o) => !termo || o.nome.toLowerCase().includes(termo))
         .sort((a, b) => b.qtdQuestoes - a.qtdQuestoes)
         .slice(0, limit);

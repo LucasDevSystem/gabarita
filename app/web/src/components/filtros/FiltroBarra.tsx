@@ -9,6 +9,7 @@ import type { FiltrosState } from "@/lib/types";
 import { FILTROS_PADRAO } from "@/router";
 import { FiltrosSalvos } from "./FiltrosSalvos";
 import { SeletorMultiplo } from "./SeletorMultiplo";
+import { SeletorAssuntoArvore } from "./SeletorAssuntoArvore";
 
 interface FiltroBarraProps {
   filtros: FiltrosState;
@@ -77,18 +78,12 @@ export function FiltroBarra({ filtros, aoMudar }: FiltroBarraProps) {
           aoMudar={(v) => aoMudar({ disciplina: v, assunto: [], page: 1 })}
           opcoes={base?.disciplinas.map((d) => ({ valor: d.id, rotulo: d.nome, qtd: d.qtdQuestoes })) ?? []}
         />
-        <SeletorMultiplo
-          label="Assunto"
+        <SeletorAssuntoArvore
           valores={filtros.assunto}
           aoMudar={(v) => aoMudar({ assunto: v, page: 1 })}
+          disciplinaIds={filtros.disciplina}
           disabled={filtros.disciplina.length === 0}
           dicaDesabilitado="Escolha a disciplina primeiro"
-          buscar={(q) =>
-            buscarLookup("assuntos", q, filtros.disciplina).then((r) =>
-              r.map((o) => ({ valor: o.id, rotulo: o.nome, qtd: o.qtdQuestoes })),
-            )
-          }
-          chaveCache={`assuntos:${filtros.disciplina.join(",")}`}
         />
         <SeletorMultiplo
           label="Banca"
